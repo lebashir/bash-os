@@ -30,13 +30,29 @@ export async function generateAndStoreBrief(
     thinkingBudget: 0,
   });
 
+  const briefTitle = `Daily brief — ${context.today}`;
+
+  // One brief per user per day. Manual re-runs of the cron (or two firings
+  // for any reason) should refresh, not stack.
+  const { error: deleteError } = await supabase
+    .from("tasks")
+    .delete()
+    .eq("user_id", userId)
+    .eq("source", "brief")
+    .eq("title", briefTitle);
+  if (deleteError) {
+    throw new Error(
+      `Failed to clear prior brief: ${deleteError.message}`,
+    );
+  }
+
   const briefPosition = await leadingPosition(supabase, userId, "todays plate");
 
   const { data: inserted, error } = await supabase
     .from("tasks")
     .insert({
       user_id: userId,
-      title: `Daily brief — ${context.today}`,
+      title: briefTitle,
       description: briefText,
       status: "todays plate" satisfies TaskStatus,
       source: "brief",

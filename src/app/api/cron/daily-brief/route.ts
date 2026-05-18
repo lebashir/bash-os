@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { revalidatePath } from "next/cache";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { syncGmailForUser } from "@/lib/board/gmail-sync";
 import { syncCalendarForUser } from "@/lib/board/calendar-sync";
@@ -92,6 +93,10 @@ export async function GET(request: NextRequest) {
 
     summaries.push(summary);
   }
+
+  // Invalidate the cached /board render so a user opening the page in the
+  // morning sees the freshly-synced items + brief without a hard refresh.
+  revalidatePath("/board");
 
   return NextResponse.json({
     ok: true,
