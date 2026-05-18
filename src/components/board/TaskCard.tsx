@@ -1,8 +1,9 @@
 "use client";
 
 import { forwardRef, type CSSProperties, type HTMLAttributes } from "react";
-import { Badge } from "@/components/ui/badge";
-import type { Task } from "@/lib/supabase/types";
+import { Calendar, Mail, Sparkles } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import type { Task, TaskSource } from "@/lib/supabase/types";
 
 type TaskCardProps = HTMLAttributes<HTMLDivElement> & {
   task: Task;
@@ -16,9 +17,23 @@ const PRIORITY_DOT: Record<string, string> = {
   urgent: "bg-red-500",
 };
 
+const SOURCE_ICON: Partial<Record<TaskSource, LucideIcon>> = {
+  gmail: Mail,
+  calendar: Calendar,
+  brief: Sparkles,
+};
+
+const SOURCE_TINT: Partial<Record<TaskSource, string>> = {
+  gmail: "text-rose-500",
+  calendar: "text-sky-500",
+  brief: "text-amber-500",
+};
+
 export const TaskCard = forwardRef<HTMLDivElement, TaskCardProps>(
   function TaskCard({ task, isOverlay, isDragging, className, ...rest }, ref) {
     const dot = task.priority ? PRIORITY_DOT[task.priority] : undefined;
+    const SourceIcon = SOURCE_ICON[task.source];
+    const sourceTint = SOURCE_TINT[task.source] ?? "text-muted-foreground";
 
     return (
       <div
@@ -29,6 +44,12 @@ export const TaskCard = forwardRef<HTMLDivElement, TaskCardProps>(
         } ${isOverlay ? "shadow-lg rotate-1" : ""} ${className ?? ""}`}
       >
         <div className="flex items-start gap-2">
+          {SourceIcon ? (
+            <SourceIcon
+              className={`size-3.5 mt-0.5 shrink-0 ${sourceTint}`}
+              aria-hidden
+            />
+          ) : null}
           {dot ? (
             <span
               className={`inline-block size-2 rounded-full mt-1.5 shrink-0 ${dot}`}
@@ -39,20 +60,13 @@ export const TaskCard = forwardRef<HTMLDivElement, TaskCardProps>(
             {task.title}
           </p>
         </div>
-        {(task.source_id || task.due_date) && (
-          <div className="flex items-center gap-2 flex-wrap">
-            {task.source_id ? (
-              <Badge variant="secondary" className="font-mono text-[10px]">
-                {task.source_id}
-              </Badge>
-            ) : null}
+        {(task.due_date || task.source_account) && (
+          <div className="flex items-center gap-2 flex-wrap pl-5 text-[10px] text-muted-foreground">
             {task.due_date ? (
-              <span className="text-[10px] text-muted-foreground">
-                {new Date(task.due_date).toLocaleDateString(undefined, {
-                  month: "short",
-                  day: "numeric",
-                })}
-              </span>
+              <span>{formatTaskTime(task.due_date, task.source)}</span>
+            ) : null}
+            {task.source_account ? (
+              <span className="truncate max-w-[24ch]">{task.source_account}</span>
             ) : null}
           </div>
         )}
@@ -60,3 +74,19 @@ export const TaskCard = forwardRef<HTMLDivElement, TaskCardProps>(
     );
   },
 );
+
+function formatTaskTime(iso: string, source: TaskSource): string {
+  const d = new Date(iso);
+  // Calendar events get a date + time; other sources just get the date.
+  if (source === "calendar") {
+    return d.toLocaleString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+  }
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
