@@ -1,52 +1,47 @@
 # Bash OS
 
-A personal life-OS for one person (Bashir). Round 1 is a local-first kanban board backed by Supabase: seven columns capture everything from raw ideas (`things to think about`) through delegated work (`Bash work`, `Claude work`, `Boss Check`) to closed-out items (`DIgested.`). Cards carry priority, due date, and a free-form source ID. Future rounds add connectors (Gmail, Calendar, Slack, Jira/ClickUp), a memory layer, a daily brief, and scheduled jobs — none of that is built yet.
+## What Bash OS is
+
+A personal life-OS for one person (Bashir). A seven-column kanban is the surface; behind it sits a Supabase store, a set of connectors that ingest signals from Gmail, Google Calendar, and Jira into the board, a chat assistant that can read the board and take action through tool-calls, a long-term memory layer that the assistant retrieves from per turn, and a daily brief generated each morning by a scheduled job. The kanban is the visible part; the rest is the operating system underneath it.
 
 ## Stack
 
-- **Next.js 16** (App Router, TypeScript, Turbopack, Tailwind 4)
-- **shadcn/ui** on Radix primitives
-- **@dnd-kit** for drag-and-drop
-- **Supabase** (Postgres + Auth + pgvector) — local Docker stack for dev, cloud project for production
-- **Google OAuth** via Supabase Auth
-- **pnpm** for package management
-- Hosting target: **Vercel** free tier (not yet deployed)
+- **Next.js 16** — App Router, TypeScript, Turbopack. Note: Next 16 renamed `middleware.ts` → `proxy.ts`.
+- **Tailwind 4** — utility-first styling.
+- **shadcn/ui** — components on Radix primitives; toasts via `sonner`.
+- **@dnd-kit** — drag-and-drop on the board (`core` + `sortable` + `utilities`).
+- **AI SDK v6** (`ai` + `@ai-sdk/google` + `@ai-sdk/react`) — chat agent, streaming, embeddings, daily brief generation.
+- **Gemini** — `gemini-3-flash-preview` for chat + daily brief; `gemini-embedding-001` (1536 dims) for memories.
+- **Supabase** — Postgres + pgvector + Auth + RLS. Cloud project ref `vbooingflkmzxcqnbvxr`.
+- **Vercel** — hosting at `bash-os.vercel.app`; Vercel Cron for the daily brief.
+- **pnpm** — package manager.
+
+## Architecture overview
+
+The board is the only thing the user looks at. Tasks live in `public.tasks`, gated by RLS so the Supabase clients only ever see one user's rows. Connectors run server-side: Gmail and Google Calendar use multi-account OAuth with refresh tokens stored in `connector_tokens`; Jira uses a personal access token from env. Each connector pulls fresh items and `upsert`s them into `tasks` with `source` set to its name, deduped on `(user_id, source, source_account, source_id)`. The chat drawer is powered by AI SDK's `useChat` calling a streaming `/api/chat` route; that route builds a per-turn context (board state, calendar next-24h, recent emails, top-K semantically matched memories) and runs a `ToolLoopAgent` with four mutating tools (`createTask`, `moveTask`, `updateTask`, `deleteTask`). Memory writes happen via the "Remember" button on user messages, which embeds the content and inserts into `public.memories`; memory reads happen automatically every chat turn via a pgvector `match_memories` RPC. A Vercel Cron job at 5:30 UTC (9:30am Dubai) re-syncs each user's connectors and generates a daily brief task, dropped at the top of "todays plate".
 
 ## Prerequisites
 
 - Node 20+
 - pnpm
-- Docker (only needed for local Supabase; cloud-only dev works without it)
-- Supabase CLI (`brew install supabase`)
-- A Google Cloud project with an OAuth client (Web application type)
+- Docker (only if you want to run a local Supabase stack — see Local dev caveat)
+- Supabase CLI (`brew install supabase/tap/supabase`)
+- A Google Cloud project with an OAuth 2.0 Web client + Gemini API key
+- For Jira: an Atlassian site and API token (https://id.atlassian.com/manage-profile/security/api-tokens)
+- For Slack: a custom Slack app with `im:history`, `im:read`, `users:read` user scopes (requires workspace admin to install — see Known issues)
 
-## Local development
-
-The fast path is **cloud-only dev** — point `.env.local` at your cloud Supabase project and skip Docker entirely. The Docker stack is documented below for offline work, but Google OAuth needs outbound TLS from inside the GoTrue container, which fails in environments with corporate TLS interception.
-
-### Cloud-only (recommended)
+## Local dev
 
 ```bash
 pnpm install
 cp .env.example .env.local
-# Edit .env.local — fill in your cloud Supabase project URL and anon/publishable key.
+# Edit .env.local — fill in cloud Supabase URL + anon key + GEMINI_API_KEY + Google OAuth client + (optional) Jira/Slack
 pnpm dev
 ```
 
-Then open http://localhost:3000 (or whatever port Next picks) and sign in with Google.
+Then open `http://localhost:3000` and sign in with Google.
 
-### Local Supabase stack
-
-```bash
-pnpm install
-supabase start --exclude edge-runtime,logflare,vector
-# Copy the printed Project URL and publishable key into .env.local.
-pnpm dev
-```
-
-`edge-runtime`, `logflare`, and `vector` are excluded because the edge runtime pulls Deno modules from `deno.land` on startup, which fails behind any TLS interception. You don't need them for R1.
-
-For local Google OAuth to work, the GoTrue container also needs to reach `accounts.google.com` over TLS — same trust-store problem. If that doesn't work in your network, either point `.env.local` at your cloud project (above) or enable email magic links in `supabase/config.toml` and use Mailpit at http://127.0.0.1:54324.
+**Tabby network caveat:** local Supabase via Docker (`supabase start`) is broken on the Tabby corporate network. Outbound TLS from inside the GoTrue / `edge-runtime` containers fails with `x509: certificate signed by unknown authority` because of corporate TLS interception, so Google OAuth and Deno module fetches don't work. The actual dev workflow is **cloud-only** — `.env.local` points at the cloud Supabase project (`vbooingflkmzxcqnbvxr`) and there's no local DB at all. If you ever need local Supabase, you'd need IT to provide the corporate root CA and mount it into the GoTrue container's trust store. See `docs/ARCHITECTURE.md` for the full story.
 
 ## Database migrations
 
@@ -54,64 +49,109 @@ For local Google OAuth to work, the GoTrue container also needs to reach `accoun
 # Create a new migration
 supabase migration new <descriptive_name>
 
-# Apply locally (destructive — wipes local DB and re-runs every migration)
-supabase db reset
-
-# Apply to cloud (after `supabase link --project-ref <ref>`)
+# Apply to cloud (after `supabase link --project-ref vbooingflkmzxcqnbvxr`)
 supabase db push
 ```
 
-The initial migration (`supabase/migrations/<timestamp>_init.sql`) creates:
+`supabase db reset` works against the local stack — it's not part of the normal dev flow here for the network reasons above.
 
-- `public.tasks` — kanban cards with the seven hard-coded status values, optional priority/due date/source ID, a `position` integer for ordering within a column, and an `updated_at` trigger.
-- `public.memories` — reserved for Round 2; a `content` + `vector(1536)` + `tags` table for later embedding-based recall. Empty in R1.
+Migrations (in apply order):
 
-Both tables have RLS enabled with separate `select`/`insert`/`update`/`delete` policies, all gated by `auth.uid() = user_id` and scoped to the `authenticated` role.
+| File | Purpose |
+|---|---|
+| `20260518165725_init.sql` | R1 — `tasks` + `memories` tables, the 7-status CHECK constraint, RLS policies on both, `pgvector` extension. |
+| `20260518223740_r2_connector_tokens_and_task_source.sql` | Adds `connector_tokens` for OAuth + `tasks.source` CHECK. |
+| `20260518230026_r2_multi_account_connectors.sql` | Lifts the unique key on `connector_tokens` from `(user_id, provider)` to `(user_id, provider, account_email)` so one user can link multiple Google accounts. |
+| `20260518232130_r2_tasks_dedup_constraint.sql` | Replaces the partial dedup index with a full unique constraint compatible with PostgREST `upsert`. |
+| `20260518232847_r2_add_brief_source.sql` | Adds `'brief'` to the `tasks.source` CHECK so the daily brief writes don't violate it. |
+| `20260518235838_r2_chat_messages.sql` | Chat persistence table for the assistant drawer. |
+| `20260519000100_r2_memory_search.sql` | HNSW cosine index on `memories.embedding` + `match_memories(query_embedding, match_count)` RPC. |
 
-The seven status values are matched verbatim by a CHECK constraint:
+## Environment variables
 
+See `.env.example` for the canonical list. Quick reference:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | yes | Cloud Supabase project URL. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Cloud Supabase anon/publishable key. |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server-only. Used by the cron job to bypass RLS when fanning out per-user syncs. Never exposed client-side. |
+| `GOOGLE_OAUTH_CLIENT_ID` | yes | Google OAuth Web client ID. Used by `/connectors/google/connect` to start the OAuth dance and by token refresh. |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | yes | Paired with the client ID. |
+| `GEMINI_API_KEY` | yes | Direct Google Generative Language API key from https://aistudio.google.com/apikey. Used for chat, brief, embeddings. |
+| `CRON_SECRET` | yes | Random string. Vercel Cron sends it as `Authorization: Bearer <value>` to `/api/cron/daily-brief`. |
+| `JIRA_BASE_URL` | optional | e.g. `https://tabby.atlassian.net`. Skipping any of the three Jira vars silently disables the Jira connector. |
+| `JIRA_EMAIL` | optional | Atlassian login email. |
+| `JIRA_API_TOKEN` | optional | Personal API token. |
+| `SLACK_USER_TOKEN` | optional | `xoxp-…` user token. Silently disables Slack connector when unset. See Known issues — currently blocked by org admin policy. |
+
+## Connectors
+
+### Google (Gmail + Calendar) — OAuth, multi-account
+
+- Token flow: `/connectors/google/connect` redirects to Google OAuth; `/connectors/google/callback` exchanges the code, stores `access_token` + `refresh_token` + `expires_at` + `scopes` in `connector_tokens` keyed on `(user_id, provider='google', account_email)`. One Bash OS user can connect multiple Google accounts (e.g. work + personal).
+- Scopes requested: `openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly`.
+- Refresh: lazy. On each connector call, `getGoogleAccessToken` reads the stored row; if it's within 60s of expiry, refreshes against `https://oauth2.googleapis.com/token` and persists the new access token + expiry. Failed refresh surfaces as "reconnect the account".
+- **Gmail sync:** queries `is:unread in:inbox`, pulls last 20 messages, lands them in `things to think about` with `source='gmail'`, `source_account=<email>`, `source_id=<gmail message id>`. Dedup via `(user_id, source, source_account, source_id)`.
+- **Calendar sync:** pulls the next 24h of events, lands them with `source='calendar'`. `due_date` is set to the event start time.
+
+### Jira — PAT, single site
+
+- No OAuth dance. Token read from `JIRA_API_TOKEN` env, paired with `JIRA_EMAIL` for HTTP Basic auth against `JIRA_BASE_URL`.
+- JQL: `assignee = currentUser() AND statusCategory != Done`. Hits `POST /rest/api/3/search/jql` (the new endpoint after Atlassian deprecated `GET /search`).
+- Lands issues in **Bash work** (assigned issues are already actionable) with `source='jira'`, `source_account=<host>`, `source_id=<ISSUE-KEY>`. Maps Jira priority Highest/High/Medium/Low/Lowest → bash-os `urgent`/`high`/`normal`/`low`. Sets `due_date` from `fields.duedate` if present.
+
+### Slack — code shipped, blocked at install time
+
+- Code lives at `src/lib/board/slack-sync.ts`. Reads `SLACK_USER_TOKEN` (a `xoxp-…` user token), calls `auth.test` to discover workspace + self ID, lists DM channels via `conversations.list?types=im`, pulls last 48h from each via `conversations.history`, drops the OTHER party's messages into `things to think about` deduped by `(channel:ts)`.
+- Bashir is not a workspace admin at Tabby and Slack killed legacy user tokens in 2020, so the token can't currently be obtained. The connector silently no-ops when `SLACK_USER_TOKEN` is unset, so the rest of the app is unaffected.
+
+## Chat tools
+
+The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has four tools, all mutating, all scoped to the authenticated user via RLS:
+
+| Tool | Purpose |
+|---|---|
+| `createTask` | Adds a new task. Defaults to `things to think about` unless the user says "today/now/urgent". |
+| `moveTask` | Resolves a task by title fragment (`ILIKE`) and moves it to a destination column. Positions to end of target column. |
+| `updateTask` | Resolves by title fragment; partial update of title/description/priority/status. |
+| `deleteTask` | Permanent removal. System prompt restricts to explicit user delete intent. |
+
+Task resolution returns an "ambiguity" error with candidate titles when more than one task matches the fragment — the agent surfaces those to the user instead of guessing.
+
+## Memories + RAG
+
+- **Write side ("Remember" button):** each user chat bubble has a button that calls `commitToMemory(content, ['from-chat'])` (`src/app/board/memories.ts`). The content is embedded via `gemini-embedding-001` at 1536 dims with `taskType='RETRIEVAL_DOCUMENT'`, and inserted into `public.memories` (one row per memory, `embedding vector(1536)`, free-form `tags text[]`).
+- **Read side (per chat turn):** every `/api/chat` POST embeds the user's incoming message with `taskType='RETRIEVAL_QUERY'`, calls the `match_memories(query_embedding, match_count)` RPC (SECURITY INVOKER — RLS-gated automatically), filters matches under cosine 0.55, and injects the top-K above the board state in the LLM context with the system-prompt instruction "treat as ground truth".
+- HNSW `vector_cosine_ops` index on `memories.embedding` keeps the search fast as the table grows.
+
+## Scheduled jobs
+
+`vercel.json` declares one cron:
+
+```json
+{ "path": "/api/cron/daily-brief", "schedule": "30 5 * * *" }
 ```
-things to think about
-on the menu
-todays plate
-Bash work
-Claude work
-Boss Check
-DIgested.
-```
 
-## Git identity setup
+That's `05:30 UTC` = **09:30 Dubai (UTC+4)**. The endpoint:
 
-The repo lives under a personal GitHub account (`lebashir/bash-os`). On the work machine, the `gh`/git credential store is the work account, which has been added as a collaborator on the personal repo — that way `git push` works without account switching.
+1. Verifies the `Authorization: Bearer <CRON_SECRET>` header (returns 401 if missing/wrong).
+2. Uses the service-role client to list all users with at least one connected Google account.
+3. For each user, syncs Gmail + Calendar in parallel, then generates the brief via `gemini-3-flash-preview`.
+4. Deletes any prior brief for the same day (idempotent re-runs refresh rather than stack), then inserts the new brief at the top of `todays plate`.
+5. Calls `revalidatePath('/board')` so the next page render reflects the new state.
 
-Commit authorship is pinned at the **repo level** to the personal identity via `.git/config`:
-
-```
-git config --local user.name "Bashir"
-git config --local user.email "<personal email>"
-```
-
-This only affects this repo; other repos on the machine keep their own settings. Verify with `git config --local --get user.email` before committing.
+To verify the cron is firing in production: trigger it manually with the same auth header — `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. A 200 with a `{ok:true, userCount, summaries:[…]}` body means the full pipeline ran.
 
 ## Deploying to Vercel
 
-1. Import the repo at https://vercel.com under the personal account.
-2. Framework preset auto-detects Next.js.
-3. Set the same env vars from `.env.example`:
-   - `NEXT_PUBLIC_SUPABASE_URL` — cloud project URL
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` — cloud project publishable/anon key
-4. After the first deploy, copy the Vercel production URL and:
-   - In the Supabase dashboard: **Authentication → URL Configuration** → set Site URL to the Vercel domain, add `https://<domain>/**` to Redirect URLs.
-   - In Google Cloud Console: add `https://<domain>/auth/callback` and `https://<ref>.supabase.co/auth/v1/callback` (if not already there) to the OAuth client's Authorized redirect URIs.
+1. Repo lives at `https://github.com/lebashir/bash-os` (personal GitHub account). Pushes to `main` auto-deploy to `bash-os.vercel.app`.
+2. All env vars from `.env.example` must be set on the Vercel project (Settings → Environment Variables, Production scope). `vercel env add NAME production` is the CLI shortcut.
+3. In **Supabase dashboard → Authentication → URL Configuration**: Site URL = `https://bash-os.vercel.app`; Redirect URLs include `https://bash-os.vercel.app/**`.
+4. In **Google Cloud Console → OAuth client**: Authorized redirect URIs include `https://bash-os.vercel.app/auth/callback`, `https://bash-os.vercel.app/connectors/google/callback`, and the Supabase auth callback `https://vbooingflkmzxcqnbvxr.supabase.co/auth/v1/callback`.
 
-## Round 1 scope
+Vercel Server Actions and Route Handlers read env vars at runtime — adding or rotating a non-`NEXT_PUBLIC_*` var does not require a redeploy. `NEXT_PUBLIC_*` vars are inlined at build time and DO require a redeploy.
 
-**In:** Google sign-in, 7-column kanban, drag-and-drop with persisted ordering, full CRUD via shadcn dialog, cloud Supabase with RLS.
+## Round status
 
-**Out (explicit non-goals — coming later rounds):**
-- LLM calls of any kind
-- External connectors (Gmail, Google Calendar, Slack, Jira, ClickUp, etc.)
-- Scheduled jobs / daily brief
-- Memory chat or embedding-based recall (table exists but unused)
-- Multi-user / sharing / collaboration
-- Mobile-optimized layout (works on mobile, not tuned for it)
+R1 and R2 are complete. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R3+ plan.
