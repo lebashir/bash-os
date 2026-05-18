@@ -7,6 +7,7 @@ import {
 } from "ai";
 import { z } from "zod";
 import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
+import { searchMemories } from "@/lib/board/memory-search";
 import {
   TASK_PRIORITIES,
   TASK_STATUSES,
@@ -21,9 +22,10 @@ const GMAIL_LOOKBACK_HOURS = 48;
 const MAX_TOOL_STEPS = 8;
 const RESOLVE_CANDIDATE_LIMIT = 5;
 const CONTEXT_TASKS_PER_COLUMN = 12;
+const MEMORY_MATCH_LIMIT = 5;
 
 const CHAT_SYSTEM_PROMPT = `You are Bash OS's chat assistant — a calm, sharp helper for Bashir's personal life-OS.
-You have visibility into the current kanban board, today's calendar events, and recently-synced emails. Use this context when it's relevant; ignore it when it isn't.
+You have visibility into the current kanban board, today's calendar events, recently-synced emails, and long-term memories that Bashir has explicitly chosen to remember (retrieved by semantic similarity to the current question). Use this context when it's relevant; ignore it when it isn't. Memories represent facts the user has said are worth remembering — treat them as ground truth about preferences, decisions, or state.
 
 You can take real action on the board through these tools:
 - createTask: add a new task. Use whenever the user asks to capture, add, jot, or queue something. Default to "things to think about" for vague captures and "todays plate" only when the user explicitly says today/now/urgent.
@@ -369,7 +371,7 @@ export async function runChatTurn(
 
   const [history, contextLines] = await Promise.all([
     loadHistory(input.supabase, input.userId),
-    buildContextLines(input.supabase, input.userId),
+    buildContextLines(input.supabase, input.userId, trimmed),
   ]);
 
   const messages: ModelMessage[] = [
@@ -458,6 +460,7 @@ export async function loadHistory(
 async function buildContextLines(
   supabase: SupabaseClient,
   userId: string,
+  userMessage: string,
 ): Promise<string[]> {
   const now = new Date();
   const gmailSince = new Date(
@@ -467,7 +470,7 @@ async function buildContextLines(
     now.getTime() + CALENDAR_HORIZON_HOURS * 60 * 60 * 1000,
   ).toISOString();
 
-  const [tasks, upcomingEvents, recentGmail] = await Promise.all([
+  const [tasks, upcomingEvents, recentGmail, memories] = await Promise.all([
     supabase
       .from("tasks")
       .select("title, status, priority")
@@ -490,6 +493,12 @@ async function buildContextLines(
       .gte("created_at", gmailSince)
       .order("created_at", { ascending: false })
       .limit(8),
+    // Memory search failures shouldn't break the chat turn — treat them as
+    // "no memories matched" and log; the assistant can still reply.
+    searchMemories(supabase, userMessage, MEMORY_MATCH_LIMIT).catch((err) => {
+      console.error("[chat] memory search failed:", err);
+      return [];
+    }),
   ]);
 
   const allTasks = (tasks.data ?? []) as Task[];
@@ -497,6 +506,14 @@ async function buildContextLines(
   const lines: string[] = [];
   lines.push(`Today: ${now.toISOString().slice(0, 10)}`);
   lines.push("");
+
+  if (memories.length > 0) {
+    lines.push("Memories matching this message (most-relevant first):");
+    for (const m of memories) {
+      lines.push(`  - ${m.content}`);
+    }
+    lines.push("");
+  }
 
   lines.push("Board (tasks by column — refer to them by title when calling tools):");
   for (const status of TASK_STATUSES) {
