@@ -6,10 +6,9 @@ export const google = createGoogleGenerativeAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
-// gemini-3-flash exists on Vercel AI Gateway but the direct Google
-// Generative Language API only exposes gemini-3-flash-preview at this
-// tier — staying on the proven 2.5-flash until we either route through
-// Gateway or get preview access.
-export const CHAT_MODEL_ID = "gemini-2.5-flash";
+// The direct Google Generative Language API exposes Gemini 3 Flash
+// under -preview at this tier (verified accessible with our key).
+// Vercel AI Gateway has plain gemini-3-flash; revisit when we wire it.
+export const CHAT_MODEL_ID = "gemini-3-flash-preview";
 export const EMBEDDING_MODEL_ID = "gemini-embedding-001";
 export const EMBEDDING_DIMENSIONS = 1536;
