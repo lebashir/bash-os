@@ -5,10 +5,12 @@ import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
 import { searchMemories } from "@/lib/board/memory-search";
 import {
   TASK_PRIORITIES,
+  TASK_SOURCES,
   TASK_STATUSES,
   type ChatMessage,
   type ChatRole,
   type Task,
+  type TaskSource,
   type TaskStatus,
 } from "@/lib/supabase/types";
 
@@ -23,11 +25,15 @@ const MEMORY_MATCH_LIMIT = 5;
 const CHAT_SYSTEM_PROMPT = `You are Bash OS's chat assistant — a calm, sharp helper for Bashir's personal life-OS.
 You have visibility into the current kanban board, today's calendar events, recently-synced emails, and long-term memories that Bashir has explicitly chosen to remember (retrieved by semantic similarity to the current question). Use this context when it's relevant; ignore it when it isn't. Memories represent facts the user has said are worth remembering — treat them as ground truth about preferences, decisions, or state.
 
-You can take real action on the board through these tools:
+You can take real action on the board through these mutating tools:
 - createTask: add a new task. Use whenever the user asks to capture, add, jot, or queue something. Default to "things to think about" for vague captures and "todays plate" only when the user explicitly says today/now/urgent.
 - moveTask: move an existing task to a different column. Refer to the task by a fragment of its title — the tool resolves it server-side.
 - updateTask: change the title, description, priority, or status of an existing task. Pass only the fields that change.
 - deleteTask: permanently remove a task. Only call this when the user explicitly asks to delete (not "archive", "move", or "done"). If unsure, ask first.
+
+You also have two read-only lookup tools:
+- findTasks: keyword/filter search across Bashir's full board. Prefer this for specific lookups ("any task about X?", "what's in Bash work?") rather than scanning the injected board snapshot, which is truncated per column. Filter by status or source when the request is column- or source-specific.
+- findMemories: semantic search over the long-term memory store, beyond the per-turn auto-injected matches. Reach for it when the user asks "what did I say about…" or when the visible memories don't cover what's needed.
 
 When a tool returns a "needs clarification" error listing candidates, surface those candidates to the user and ask which one they meant — do not pick one yourself.
 
@@ -141,10 +147,83 @@ const deleteTaskInputSchema = z.object({
     ),
 });
 
+const FIND_TASKS_DEFAULT_LIMIT = 10;
+const FIND_TASKS_MAX_LIMIT = 25;
+
+const findTasksInputSchema = z.object({
+  query: z
+    .string()
+    .trim()
+    .max(300)
+    .optional()
+    .describe(
+      "Keyword fragment matched against title and description (case-insensitive). Omit to list by filter alone.",
+    ),
+  status: z
+    .enum(TASK_STATUSES)
+    .optional()
+    .describe("Restrict to a specific kanban column."),
+  source: z
+    .enum(TASK_SOURCES)
+    .optional()
+    .describe(
+      "Restrict to a specific origin (e.g. 'gmail' for emailed-in items, 'jira' for assigned issues).",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(FIND_TASKS_MAX_LIMIT)
+    .optional()
+    .describe(
+      `Max rows to return. Default ${FIND_TASKS_DEFAULT_LIMIT}, cap ${FIND_TASKS_MAX_LIMIT}.`,
+    ),
+});
+
+const FIND_MEMORIES_DEFAULT_LIMIT = 5;
+const FIND_MEMORIES_MAX_LIMIT = 10;
+
+const findMemoriesInputSchema = z.object({
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .describe("Question or phrase to semantically match against saved memories."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(FIND_MEMORIES_MAX_LIMIT)
+    .optional()
+    .describe(
+      `Max matches to return. Default ${FIND_MEMORIES_DEFAULT_LIMIT}, cap ${FIND_MEMORIES_MAX_LIMIT}.`,
+    ),
+});
+
 type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 type MoveTaskInput = z.infer<typeof moveTaskInputSchema>;
 type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
 type DeleteTaskInput = z.infer<typeof deleteTaskInputSchema>;
+type FindTasksInput = z.infer<typeof findTasksInputSchema>;
+type FindMemoriesInput = z.infer<typeof findMemoriesInputSchema>;
+
+type TaskSummary = {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  source: TaskSource;
+  source_account: string | null;
+  priority: Task["priority"];
+  due_date: string | null;
+};
+
+type MemoryMatchSummary = {
+  id: string;
+  content: string;
+  similarity: number;
+  created_at: string;
+};
 
 type TaskMutationResult = {
   id: string;
@@ -282,6 +361,59 @@ async function execDeleteTask(
   return target;
 }
 
+async function execFindTasks(
+  supabase: SupabaseClient,
+  userId: string,
+  args: FindTasksInput,
+): Promise<{ tasks: TaskSummary[]; count: number }> {
+  const limit = Math.min(
+    args.limit ?? FIND_TASKS_DEFAULT_LIMIT,
+    FIND_TASKS_MAX_LIMIT,
+  );
+
+  let query = supabase
+    .from("tasks")
+    .select("id, title, status, source, source_account, priority, due_date")
+    .eq("user_id", userId);
+
+  if (args.status) query = query.eq("status", args.status);
+  if (args.source) query = query.eq("source", args.source);
+
+  if (args.query && args.query.length > 0) {
+    const safe = args.query.replace(/[%,()]/g, " ");
+    const pattern = `%${safe}%`;
+    query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
+  }
+
+  const { data, error } = await query
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw new Error(`findTasks: ${error.message}`);
+
+  const tasks = (data ?? []) as TaskSummary[];
+  return { tasks, count: tasks.length };
+}
+
+async function execFindMemories(
+  supabase: SupabaseClient,
+  args: FindMemoriesInput,
+): Promise<{ memories: MemoryMatchSummary[]; count: number }> {
+  const limit = Math.min(
+    args.limit ?? FIND_MEMORIES_DEFAULT_LIMIT,
+    FIND_MEMORIES_MAX_LIMIT,
+  );
+
+  const matches = await searchMemories(supabase, args.query, limit);
+  const memories: MemoryMatchSummary[] = matches.map((m) => ({
+    id: m.id,
+    content: m.content,
+    similarity: m.similarity,
+    created_at: m.created_at,
+  }));
+  return { memories, count: memories.length };
+}
+
 // ---------------------------------------------------------------------------
 // Agent factory
 // ---------------------------------------------------------------------------
@@ -321,6 +453,18 @@ export function buildAgent(supabase: SupabaseClient, userId: string) {
         inputSchema: deleteTaskInputSchema,
         execute: (args) => execDeleteTask(supabase, userId, args),
       }),
+      findTasks: tool({
+        description:
+          "Read-only keyword/filter search across Bashir's full board. Use for specific lookups instead of relying on the truncated injected snapshot.",
+        inputSchema: findTasksInputSchema,
+        execute: (args) => execFindTasks(supabase, userId, args),
+      }),
+      findMemories: tool({
+        description:
+          "Read-only semantic search over Bashir's long-term memories. Use when the auto-injected memories don't cover what's needed.",
+        inputSchema: findMemoriesInputSchema,
+        execute: (args) => execFindMemories(supabase, args),
+      }),
     },
   });
 }
@@ -334,6 +478,8 @@ export const TOOL_NAMES = [
   "moveTask",
   "updateTask",
   "deleteTask",
+  "findTasks",
+  "findMemories",
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
