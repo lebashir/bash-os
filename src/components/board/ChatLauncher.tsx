@@ -68,12 +68,28 @@ export function ChatLauncher() {
         setMessages((prev) => [...prev, userMessage, assistantMessage]);
         if (toolActions.length > 0) {
           for (const action of toolActions) {
-            if (action.name === "createTask") {
-              const title =
-                typeof action.result?.title === "string"
-                  ? action.result.title
-                  : "task";
-              toast.success(`Created task: ${title}`);
+            const title =
+              typeof action.result?.title === "string"
+                ? action.result.title
+                : "task";
+            switch (action.name) {
+              case "createTask":
+                toast.success(`Created: ${title}`);
+                break;
+              case "moveTask": {
+                const status =
+                  typeof action.result?.status === "string"
+                    ? action.result.status
+                    : "another column";
+                toast.success(`Moved "${title}" → ${status}`);
+                break;
+              }
+              case "updateTask":
+                toast.success(`Updated: ${title}`);
+                break;
+              case "deleteTask":
+                toast.success(`Deleted: ${title}`);
+                break;
             }
           }
           // Pull the server-rendered board so the new tasks appear without
