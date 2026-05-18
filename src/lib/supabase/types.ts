@@ -66,3 +66,14 @@ export type Memory = {
   tags: string[];
   created_at: string;
 };
+
+export const CHAT_ROLES = ["user", "assistant"] as const;
+export type ChatRole = (typeof CHAT_ROLES)[number];
+
+export type ChatMessage = {
+  id: string;
+  user_id: string;
+  role: ChatRole;
+  content: string;
+  created_at: string;
+};

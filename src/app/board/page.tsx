@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { AccountMenu } from "@/components/board/AccountMenu";
 import { Board } from "@/components/board/Board";
+import { ChatLauncher } from "@/components/board/ChatLauncher";
 import { FlashToaster } from "@/components/board/FlashToaster";
 import { SyncButton } from "@/components/board/SyncButton";
 import { createClient } from "@/lib/supabase/server";
@@ -31,6 +32,7 @@ export default async function BoardPage({ searchParams }: BoardPageProps) {
         <h1 className="text-lg font-semibold">Bash OS</h1>
         <div className="flex items-center gap-3">
           <SyncButton />
+          <ChatLauncher />
           <AccountMenu
             userEmail={user.email ?? "(no email)"}
             accounts={accounts}
