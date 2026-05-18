@@ -1,7 +1,7 @@
 "use client";
 
 import { forwardRef, type CSSProperties, type HTMLAttributes } from "react";
-import { Calendar, Mail, Sparkles } from "lucide-react";
+import { Calendar, Mail } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Task, TaskSource } from "@/lib/supabase/types";
 
@@ -20,13 +20,11 @@ const PRIORITY_DOT: Record<string, string> = {
 const SOURCE_ICON: Partial<Record<TaskSource, LucideIcon>> = {
   gmail: Mail,
   calendar: Calendar,
-  brief: Sparkles,
 };
 
 const SOURCE_TINT: Partial<Record<TaskSource, string>> = {
   gmail: "text-rose-500",
   calendar: "text-sky-500",
-  brief: "text-amber-500",
 };
 
 export const TaskCard = forwardRef<HTMLDivElement, TaskCardProps>(
