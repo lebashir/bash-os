@@ -15,6 +15,7 @@ type ColumnProps = {
   onTaskCreated: (task: Task) => void;
   onTaskUpdated: (task: Task) => void;
   onTaskDeleted: (id: string) => void;
+  onChildrenCreated: (children: Task[]) => void;
 };
 
 export function Column({
@@ -23,6 +24,7 @@ export function Column({
   onTaskCreated,
   onTaskUpdated,
   onTaskDeleted,
+  onChildrenCreated,
 }: ColumnProps) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
   const [openCreate, setOpenCreate] = useState(false);
@@ -63,6 +65,7 @@ export function Column({
               task={task}
               onUpdated={onTaskUpdated}
               onDeleted={onTaskDeleted}
+              onChildrenCreated={onChildrenCreated}
             />
           ))}
         </SortableContext>

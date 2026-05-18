@@ -271,6 +271,29 @@ Threshold is `IMPORTANCE_THRESHOLD = 4` in `src/lib/board/email-importance.ts`. 
 
 ---
 
+## Task decomposition
+
+R3b adds a "Break it down" affordance on each task: an icon button on the card opens a dialog that asks Gemini 3 Flash to propose 2-5 atomic child tasks for the parent, classified into one of three work columns. The user reviews, edits, and confirms before any rows are inserted.
+
+**Schema.** `public.tasks.parent_id uuid null references public.tasks(id) on delete cascade`, plus a partial index on rows where `parent_id is not null`. Children are normal task rows on the board — they're not nested visually, just queryable via the FK. ON DELETE CASCADE was a deliberate choice: a parent without its children isn't load-bearing for the kanban, and orphan children with no context point to deleted work make the board harder to read.
+
+**No nested decomposition.** R3b is two levels deep — a child can't itself be decomposed. The UI enforces this by hiding the Break-it-down button when `parent_id` is set; the schema doesn't. Lifting this would mean handling tree depth in the agent prompt (to avoid recursive sub-task explosions) and the UI (parent-of-parent chains). Not worth the complexity for the single-user case.
+
+**Classification rubric.** The decomposition agent routes each child into one of:
+- `Bash work` — relationships, judgment calls, irreversible actions. Meetings, decisions, external communications, anything requiring Bashir's personal context or authority.
+- `Claude work` — mechanical, low-judgment, reversible. Research, drafting, formatting, cross-referencing. The kind of unattended LLM work that produces a useful output.
+- `Boss Check` — Claude drafts something, Bashir approves before it ships. Procedure responses, status updates, draft replies, code that needs review before deploy.
+
+The agent returns `{ children: [{ title, description, status, rationale }] }` via `generateObject` with a Zod schema. `rationale` is shown in the dialog but not persisted — it's there to make the agent's reasoning legible during review.
+
+**Show, don't auto-insert.** `decomposeTask(taskId)` only proposes; it does not write. The user reviews children in the `DecomposeDialog`, edits inline (title, description, column), can deselect any, and clicks "Create N sub-tasks". `createDecomposedChildren(parentId, children[])` is the write path. This is the same pattern as the chat agent's mutating tools — propose then confirm, no surprise writes.
+
+**Child source IDs.** Children inherit the parent's `source_id` (or fall back to its UUID) and append a kebab-case slug derived from the child title: `{parent.source_id ?? parent.id}/{slug}`. The slug is 1-3 lowercased words, max 30 chars. Examples: `PMP-65/draft-pricing-tiers`, `<parent-uuid>/check-calendar`. The slash is significant — it makes the parent-child relationship visible in any UI that surfaces `source_id` (TaskDialog, future filters) without needing to read `parent_id` separately.
+
+**Parent display in TaskDialog.** When a child task is opened, the TaskDialog renders a faded `↑ parent: <parent title>` line above the title field. The parent title is fetched lazily via `getParentSummary(parentId)` so the dialog doesn't need to ship the full parent row in every prop tree.
+
+---
+
 ## The Tabby network TLS issue
 
 Local Supabase via Docker is **broken on the Tabby corporate network** and we don't develop against it. The story:

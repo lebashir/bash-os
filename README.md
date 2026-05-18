@@ -70,6 +70,7 @@ Migrations (in apply order):
 | `20260519000100_r2_memory_search.sql` | HNSW cosine index on `memories.embedding` + `match_memories(query_embedding, match_count)` RPC. |
 | `20260519010000_r2_5_briefs_table.sql` | R2.5 — adds `public.briefs` with `unique (user_id, brief_date)`, deletes any existing brief-tasks, drops `'brief'` from the `tasks.source` CHECK. |
 | `20260519020000_r3a_tasks_importance.sql` | R3a — adds `tasks.importance smallint null` for the Gmail importance scorer. |
+| `20260519030000_r3b_tasks_parent_id.sql` | R3b — adds `tasks.parent_id uuid` (self-FK, ON DELETE CASCADE) + partial index for the task-decomposition feature. |
 
 ## Environment variables
 
@@ -132,6 +133,14 @@ The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has six tools, all s
 
 Task resolution returns an "ambiguity" error with candidate titles when more than one task matches the fragment — the agent surfaces those to the user instead of guessing.
 
+## Task decomposition ("Break it down")
+
+Hover any task on the board and a small split icon appears in the top-right of the card (hidden on child tasks — R3b is two levels deep). Clicking opens a dialog that asks Gemini 3 Flash to propose 2-5 atomic sub-tasks classified into `Bash work` / `Claude work` / `Boss Check`. Each proposed child is editable inline (title, description, column) and has a checkbox; the user clicks "Create N sub-tasks" to insert them, or cancels.
+
+The agent never writes directly — `decomposeTask(taskId)` only proposes; `createDecomposedChildren(parentId, children[])` is a separate action triggered by the dialog's Create button. Children carry `parent_id` set to the parent's UUID and inherit a `source_id` prefix from the parent (`{parent.source_id ?? parent.id}/{kebab-slug}`) so the relationship is visible at a glance. Opening a child task in the editor shows a faded `↑ parent: <title>` line above the title.
+
+See `docs/ARCHITECTURE.md` → "Task decomposition" for the schema, classification rubric, and rationale.
+
 ## Memories + RAG
 
 - **Write side ("Remember" button):** each user chat bubble has a button that calls `commitToMemory(content, ['from-chat'])` (`src/app/board/memories.ts`). The content is embedded via `gemini-embedding-001` at 1536 dims with `taskType='RETRIEVAL_DOCUMENT'`, and inserted into `public.memories` (one row per memory, `embedding vector(1536)`, free-form `tags text[]`).
@@ -167,4 +176,4 @@ Vercel Server Actions and Route Handlers read env vars at runtime — adding or 
 
 ## Round status
 
-R1, R2, R2.5, and R3a are complete. R3b (task decomposition) is the active round. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R3+ plan.
+R1, R2, R2.5, and R3 (both R3a and R3b) are complete. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R4+ plan.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -34,6 +34,7 @@ import {
   updateTask,
   type TaskFormInput,
 } from "@/app/board/actions";
+import { getParentSummary } from "@/app/board/decompose-actions";
 
 type CreateProps = {
   mode: "create";
@@ -81,6 +82,29 @@ export function TaskDialog(props: TaskDialogProps) {
   const [sourceId, setSourceId] = useState(initial?.source_id ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [parentTitle, setParentTitle] = useState<string | null>(null);
+
+  const parentId = isEdit ? props.task.parent_id : null;
+
+  useEffect(() => {
+    if (!parentId) {
+      setParentTitle(null);
+      return;
+    }
+    let cancelled = false;
+    getParentSummary(parentId)
+      .then((parent) => {
+        if (cancelled) return;
+        setParentTitle(parent?.title ?? null);
+      })
+      .catch(() => {
+        // Best-effort label; failing silently is fine — the parent_id is
+        // still queryable via SQL even if the title doesn't render.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [parentId]);
 
   function buildInput(): TaskFormInput {
     return {
@@ -148,6 +172,11 @@ export function TaskDialog(props: TaskDialogProps) {
           </DialogHeader>
 
           <div className="grid gap-3">
+            {parentTitle ? (
+              <div className="text-xs text-muted-foreground/70 italic">
+                ↑ parent: {parentTitle}
+              </div>
+            ) : null}
             <div className="grid gap-1.5">
               <Label htmlFor="title">Title</Label>
               <Input

@@ -36,6 +36,7 @@ export type Task = {
   due_date: string | null;
   position: number;
   importance: number | null;
+  parent_id: string | null;
   created_at: string;
   updated_at: string;
 };

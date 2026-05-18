@@ -66,9 +66,9 @@ A small round between R2 and R3 to fix one wrong abstraction, add one missing pr
 
 ---
 
-## R3 — Email importance filtering + decomposition — 🚧 In progress
+## R3 — Email importance filtering + decomposition — ✅ Complete (2026-05-19)
 
-Split into two sub-rounds shipped back-to-back. R3a in flight on 2026-05-19; R3b queued behind it.
+Split into two sub-rounds shipped back-to-back on 2026-05-19.
 
 ### R3a — Email importance filtering — ✅ Complete (2026-05-19)
 
@@ -79,12 +79,17 @@ Split into two sub-rounds shipped back-to-back. R3a in flight on 2026-05-19; R3b
 - Rubric verified on five canonical fixtures against the dev project: personal action request → 10, calendar invite (required) → 8, newsletter → 4, marketing promo → 1, CC chain → 4. No prompt iteration needed.
 - Cleared known issue #6 (Gmail firehose).
 
-### R3b — Task decomposition — 🔜 Planned
+### R3b — Task decomposition — ✅ Complete (2026-05-19)
 
-- *Why it matters:* A Jira issue or a vague capture like "ship the new pricing flow" isn't actionable — it's a project. The board has a `Claude work` column and a `Boss Check` column precisely because some tasks should be split into sub-tasks across multiple actors. Right now there's no way to do that split.
-- *Rough shape:* A "Break it down" button on a task opens an agent flow that proposes a tree: parent → 2-5 children. Children are classified into `Bash work` / `Claude work` / `Boss Check` per the agent rubric. A `parent_id uuid` column on `tasks` (FK self-reference, ON DELETE CASCADE) makes the tree queryable; children get a slashed source ID like `{parent.source_id ?? parent.id}/{slug}` so the relationship is visible at a glance.
+- New `tasks.parent_id uuid null references public.tasks(id) on delete cascade` plus a partial index `idx_tasks_parent_id` on the column where it's non-null (migration `20260519030000_r3b_tasks_parent_id.sql`).
+- Hover-revealed "Break it down" icon button on each TaskCard, hidden when the task already has a parent (R3b is a two-level tree — children don't decompose further).
+- New `DecomposeDialog` opens, runs `decomposeTask(taskId)` server action, and renders the proposed 2-5 children with per-row title/description/column editing plus a checkbox. User clicks "Create N sub-tasks" to insert; cancel does nothing.
+- `decomposeTask` runs a Gemini 3 Flash call with the Bash work / Claude work / Boss Check classification rubric (mechanical vs judgment vs draft-and-approve). Returns proposals; does not insert. `createDecomposedChildren` is a separate action that does the actual insert with `parent_id` set on each row.
+- Child `source_id` follows `{parent.source_id ?? parent.id}/{kebab-slug}` so the parent-child relationship is visible at a glance, e.g. `PMP-65/draft-pricing-tiers` or `<uuid>/check-calendar`.
+- `TaskDialog` shows a faded `↑ parent: <title>` line above the title when the task being viewed is a child. Fetched lazily via `getParentSummary(parentId)` server action.
+- Rubric verified on three fixtures against dev: "ship the new pricing flow" → 4 children with sensible Bash/Claude/Boss Check split; "respond to Q3 marketing roundtable invite" → 3-stage check/draft/review; "fix the dashboard latency regression" → analysis (Claude) / decision (Bash) / draft PR (Boss Check). No prompt iteration needed.
 
-**Possible R3 stretch items** (lift only one or two — don't blow scope):
+**Possible R3 stretch items not pulled in** (deferred to a future round):
 - Connector retry / backoff for transient 429s and 5xxs.
 - Per-task "remind me" timers backed by Vercel Cron + a `due_date`-driven trigger.
 

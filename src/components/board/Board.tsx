@@ -185,6 +185,10 @@ export function Board({ initialTasks }: BoardProps) {
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
 
+  function handleChildrenCreated(children: Task[]) {
+    setTasks((prev) => [...prev, ...children]);
+  }
+
   if (!mounted) {
     // Defer rendering until after hydration: @dnd-kit's generated aria-describedby
     // IDs are non-deterministic between SSR and client, which trips React's
@@ -212,6 +216,7 @@ export function Board({ initialTasks }: BoardProps) {
                 onTaskCreated={handleLocalAdd}
                 onTaskUpdated={handleLocalReplace}
                 onTaskDeleted={handleLocalDelete}
+                onChildrenCreated={handleChildrenCreated}
               />
             ))}
           </div>

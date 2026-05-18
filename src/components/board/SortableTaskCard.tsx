@@ -4,6 +4,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useState } from "react";
 import type { Task } from "@/lib/supabase/types";
+import { DecomposeDialog } from "./DecomposeDialog";
 import { TaskCard } from "./TaskCard";
 import { TaskDialog } from "./TaskDialog";
 
@@ -11,10 +12,17 @@ type Props = {
   task: Task;
   onUpdated: (task: Task) => void;
   onDeleted: (id: string) => void;
+  onChildrenCreated: (children: Task[]) => void;
 };
 
-export function SortableTaskCard({ task, onUpdated, onDeleted }: Props) {
+export function SortableTaskCard({
+  task,
+  onUpdated,
+  onDeleted,
+  onChildrenCreated,
+}: Props) {
   const [editOpen, setEditOpen] = useState(false);
+  const [decomposeOpen, setDecomposeOpen] = useState(false);
   const {
     attributes,
     listeners,
@@ -45,6 +53,7 @@ export function SortableTaskCard({ task, onUpdated, onDeleted }: Props) {
           e.stopPropagation();
           setEditOpen(true);
         }}
+        onDecomposeClick={() => setDecomposeOpen(true)}
       />
       {editOpen ? (
         <TaskDialog
@@ -54,6 +63,14 @@ export function SortableTaskCard({ task, onUpdated, onDeleted }: Props) {
           onOpenChange={setEditOpen}
           onUpdated={onUpdated}
           onDeleted={onDeleted}
+        />
+      ) : null}
+      {decomposeOpen ? (
+        <DecomposeDialog
+          task={task}
+          open={decomposeOpen}
+          onOpenChange={setDecomposeOpen}
+          onCreated={onChildrenCreated}
         />
       ) : null}
     </>
