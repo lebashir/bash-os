@@ -41,6 +41,8 @@ A personal life-OS web app: kanban board + connectors + chat assistant + memory 
 - **Local Supabase via Docker is BROKEN on the Tabby work network** (corporate TLS interception). Dev runs against cloud Supabase directly. Don't suggest "spin up local supabase" as a debugging step.
 - **OAuth refresh tokens must not leak.** No logging of `connector_tokens` rows, no echoing tokens into error messages, no client-side exposure. They live in DB columns (plaintext, RLS-protected, see ARCHITECTURE.md) and must stay there.
 - **Next 16 middleware lives in `proxy.ts`**, not `middleware.ts`. Next 16 renamed the convention.
+- **There are two Supabase projects.** `.env.local` points at `bash-os-dev` (ref `xuqpifhojipuzqrowadt`) for local iteration. Vercel env vars point at `bash-os` (ref `vbooingflkmzxcqnbvxr`) for production. Never apply schema changes to prod before dev. Never iterate LLM prompts (chat system prompt, brief system prompt) against prod. See `docs/ARCHITECTURE.md` → "Dev / prod Supabase split" for the `supabase link` / `supabase db push` workflow.
+- **Briefs are NOT tasks anymore.** R2.5 lifted them into `public.briefs` with `unique (user_id, brief_date)`. `'brief'` is no longer a legal value in the `tasks.source` CHECK. The cron `upsert`s on `(user_id, brief_date)`; same-day re-runs replace, don't stack.
 
 ## Conventions
 
@@ -53,4 +55,4 @@ A personal life-OS web app: kanban board + connectors + chat assistant + memory 
 
 ## Current round
 
-R1 (bootstrap kanban) and R2 (connectors + brief + chat + memory + streaming) are complete. Next planned is R3 (email importance filtering + decomposition). See `docs/ROUNDS.md` for the active plan — if a session starts and there's no explicit ask, that file is the answer to "what's next".
+R1 (bootstrap kanban), R2 (connectors + brief + chat + memory + streaming), and R2.5 (briefs table refactor + chat read tools + dev/prod Supabase split) are complete. Next planned is R3 (email importance filtering + decomposition). See `docs/ROUNDS.md` for the active plan — if a session starts and there's no explicit ask, that file is the answer to "what's next".

@@ -18,7 +18,7 @@ A personal life-OS for one person (Bashir). A seven-column kanban is the surface
 
 ## Architecture overview
 
-The board is the only thing the user looks at. Tasks live in `public.tasks`, gated by RLS so the Supabase clients only ever see one user's rows. Connectors run server-side: Gmail and Google Calendar use multi-account OAuth with refresh tokens stored in `connector_tokens`; Jira uses a personal access token from env. Each connector pulls fresh items and `upsert`s them into `tasks` with `source` set to its name, deduped on `(user_id, source, source_account, source_id)`. The chat drawer is powered by AI SDK's `useChat` calling a streaming `/api/chat` route; that route builds a per-turn context (board state, calendar next-24h, recent emails, top-K semantically matched memories) and runs a `ToolLoopAgent` with four mutating tools (`createTask`, `moveTask`, `updateTask`, `deleteTask`). Memory writes happen via the "Remember" button on user messages, which embeds the content and inserts into `public.memories`; memory reads happen automatically every chat turn via a pgvector `match_memories` RPC. A Vercel Cron job at 5:30 UTC (9:30am Dubai) re-syncs each user's connectors and generates a daily brief task, dropped at the top of "todays plate".
+The board is the only thing the user looks at. Tasks live in `public.tasks`, gated by RLS so the Supabase clients only ever see one user's rows. Connectors run server-side: Gmail and Google Calendar use multi-account OAuth with refresh tokens stored in `connector_tokens`; Jira uses a personal access token from env. Each connector pulls fresh items and `upsert`s them into `tasks` with `source` set to its name, deduped on `(user_id, source, source_account, source_id)`. The chat drawer is powered by AI SDK's `useChat` calling a streaming `/api/chat` route; that route builds a per-turn context (board state, calendar next-24h, recent emails, top-K semantically matched memories) and runs a `ToolLoopAgent` with four mutating tools (`createTask`, `moveTask`, `updateTask`, `deleteTask`) and two read tools (`findTasks`, `findMemories`). Memory writes happen via the "Remember" button on user messages, which embeds the content and inserts into `public.memories`; memory reads happen automatically every chat turn via a pgvector `match_memories` RPC. A Vercel Cron job at 5:30 UTC (9:30am Dubai) re-syncs each user's connectors and generates a daily brief into `public.briefs`, surfaced through a right-side `BriefDrawer` on the board.
 
 ## Prerequisites
 
@@ -41,7 +41,9 @@ pnpm dev
 
 Then open `http://localhost:3000` and sign in with Google.
 
-**Tabby network caveat:** local Supabase via Docker (`supabase start`) is broken on the Tabby corporate network. Outbound TLS from inside the GoTrue / `edge-runtime` containers fails with `x509: certificate signed by unknown authority` because of corporate TLS interception, so Google OAuth and Deno module fetches don't work. The actual dev workflow is **cloud-only** — `.env.local` points at the cloud Supabase project (`vbooingflkmzxcqnbvxr`) and there's no local DB at all. If you ever need local Supabase, you'd need IT to provide the corporate root CA and mount it into the GoTrue container's trust store. See `docs/ARCHITECTURE.md` for the full story.
+**Two Supabase projects, by design.** Local dev points at the `bash-os-dev` project (ref `xuqpifhojipuzqrowadt`, Sydney); production runs on `bash-os` (ref `vbooingflkmzxcqnbvxr`, Singapore). Vercel env vars are configured against prod; `.env.local` against dev. Schema changes go to dev first, prod second, after explicit approval. See `docs/ARCHITECTURE.md` → "Dev / prod Supabase split" for the full migration workflow.
+
+**Tabby network caveat:** local Supabase via Docker (`supabase start`) is broken on the Tabby corporate network. Outbound TLS from inside the GoTrue / `edge-runtime` containers fails with `x509: certificate signed by unknown authority` because of corporate TLS interception, so Google OAuth and Deno module fetches don't work. The actual dev workflow is **cloud-only** — `.env.local` points at the cloud Supabase project and there's no local DB at all. If you ever need local Supabase, you'd need IT to provide the corporate root CA and mount it into the GoTrue container's trust store. See `docs/ARCHITECTURE.md` for the full story.
 
 ## Database migrations
 
@@ -66,6 +68,7 @@ Migrations (in apply order):
 | `20260518232847_r2_add_brief_source.sql` | Adds `'brief'` to the `tasks.source` CHECK so the daily brief writes don't violate it. |
 | `20260518235838_r2_chat_messages.sql` | Chat persistence table for the assistant drawer. |
 | `20260519000100_r2_memory_search.sql` | HNSW cosine index on `memories.embedding` + `match_memories(query_embedding, match_count)` RPC. |
+| `20260519010000_r2_5_briefs_table.sql` | R2.5 — adds `public.briefs` with `unique (user_id, brief_date)`, deletes any existing brief-tasks, drops `'brief'` from the `tasks.source` CHECK. |
 
 ## Environment variables
 
@@ -108,7 +111,9 @@ See `.env.example` for the canonical list. Quick reference:
 
 ## Chat tools
 
-The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has four tools, all mutating, all scoped to the authenticated user via RLS:
+The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has six tools, all scoped to the authenticated user via RLS.
+
+**Mutating tools** (board write access):
 
 | Tool | Purpose |
 |---|---|
@@ -116,6 +121,13 @@ The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has four tools, all 
 | `moveTask` | Resolves a task by title fragment (`ILIKE`) and moves it to a destination column. Positions to end of target column. |
 | `updateTask` | Resolves by title fragment; partial update of title/description/priority/status. |
 | `deleteTask` | Permanent removal. System prompt restricts to explicit user delete intent. |
+
+**Read tools** (look beyond the per-turn injected context):
+
+| Tool | Purpose |
+|---|---|
+| `findTasks` | Keyword + status/source filtered search across the full board (default 10, max 25). Reach for this when the truncated per-column snapshot won't cover the question. |
+| `findMemories` | Semantic search over `public.memories` with the same cosine-0.55 threshold as the auto-injection (default 5, max 10). Use when the agent needs to recall something the per-turn auto-injection didn't surface. |
 
 Task resolution returns an "ambiguity" error with candidate titles when more than one task matches the fragment — the agent surfaces those to the user instead of guessing.
 
@@ -138,7 +150,7 @@ That's `05:30 UTC` = **09:30 Dubai (UTC+4)**. The endpoint:
 1. Verifies the `Authorization: Bearer <CRON_SECRET>` header (returns 401 if missing/wrong).
 2. Uses the service-role client to list all users with at least one connected Google account.
 3. For each user, syncs Gmail + Calendar in parallel, then generates the brief via `gemini-3-flash-preview`.
-4. Deletes any prior brief for the same day (idempotent re-runs refresh rather than stack), then inserts the new brief at the top of `todays plate`.
+4. Upserts the brief into `public.briefs` on `(user_id, brief_date)` — same-day re-runs replace, don't stack. `brief_date` is the current Dubai-local date.
 5. Calls `revalidatePath('/board')` so the next page render reflects the new state.
 
 To verify the cron is firing in production: trigger it manually with the same auth header — `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. A 200 with a `{ok:true, userCount, summaries:[…]}` body means the full pipeline ran.

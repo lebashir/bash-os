@@ -160,6 +160,101 @@ Manual invocation: `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os
 
 ---
 
+## Briefs vs tasks
+
+R2 stored the daily brief as a row in `public.tasks` with `source='brief'`. That was expedient — no new table, the brief shows up at the top of `todays plate` automatically, the existing CRUD handles it. R2.5 unwound it.
+
+Why it was wrong:
+
+- A brief has no column, no priority, no `position`. Putting it in a kanban row meant carrying a bunch of NULL/dummy fields and a magic `source` value the rest of the code had to special-case.
+- "One brief per day" was enforced by an ad-hoc DELETE before each insert in `generateAndStoreBrief`. That worked but it was app-level enforcement of a DB-level invariant.
+- The brief's date semantics were never captured — `brief_date` was implicit in the title string (`"Daily brief — 2026-05-19"`).
+
+R2.5 schema:
+
+```
+public.briefs (
+  id          uuid primary key,
+  user_id     uuid references auth.users(id) on delete cascade,
+  brief_date  date not null,           -- Dubai-local calendar date
+  content     text not null,
+  created_at  timestamptz default now(),
+  updated_at  timestamptz default now(),
+  unique (user_id, brief_date)
+)
+```
+
+The unique constraint enforces one-per-day at the DB. The cron now `upsert`s on `(user_id, brief_date)` — re-runs same day replace, don't stack. The `updated_at` trigger reuses the shared `public.set_updated_at()` function from R1. RLS is the same four-policy `auth.uid() = user_id` pattern every other table uses.
+
+`brief_date` is computed in JS from the current Dubai-TZ date via `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dubai' })`. Dubai is a fixed UTC+4 (no DST), so the 05:30 UTC cron always lands on the correct Dubai morning even if a manual re-run happens later in the same UTC day.
+
+**Data loss on migration.** The R2.5 migration `delete from public.tasks where source = 'brief'` permanently removed the one existing brief-task. There was no path to migrate it into `public.briefs` without parsing its title for the date, and no historical brief data worth preserving (R2 had only shipped the day before). The next cron firing populates the new table cleanly.
+
+UI surface: `BriefDrawer` (`src/components/board/BriefDrawer.tsx`) is a right-side drawer mirroring the chat drawer pattern. A `FileText` icon in the board header opens it; the body renders the selected day's content with `whitespace-pre-wrap` (briefs are plain prose by design, no markdown lib needed); a 7-day history list at the bottom swaps which day is shown. Server action `listRecentBriefs()` in `src/app/board/brief-actions.ts` is the only read path — `LIMIT 7` is fine for the foreseeable future.
+
+---
+
+## Dev / prod Supabase split
+
+R2.5 introduced a second Supabase project to keep R3's LLM iteration out of production data.
+
+- **bash-os** (ref `vbooingflkmzxcqnbvxr`, Singapore) — production. Vercel env vars point here. The morning cron writes here. End-user state lives here.
+- **bash-os-dev** (ref `xuqpifhojipuzqrowadt`, Sydney) — dev sandbox. `.env.local` points here. `pnpm dev` against this DB. Free to seed weird test data, blow away the schema, iterate prompts against synthetic boards.
+
+Both projects share the same Google OAuth client. The dev project's `auth/v1/callback` is in the OAuth client's authorized redirect URIs alongside prod's. Site URL on dev is `http://localhost:3000` (so post-sign-in lands locally); on prod it's `https://bash-os.vercel.app`.
+
+**Migration workflow:**
+
+```bash
+# Default: linked to dev for iteration
+supabase migration new <name>
+# … edit migration …
+supabase db push                          # applies to DEV
+
+# After explicit approval to ship:
+supabase link --project-ref vbooingflkmzxcqnbvxr
+supabase db push                          # applies to PROD
+supabase link --project-ref xuqpifhojipuzqrowadt   # re-link back to dev
+```
+
+Hard rule: never apply a migration to prod before dev. Never iterate LLM prompts (chat system prompt, brief system prompt) against prod. The dev project's region differs from prod (Sydney vs Singapore), which is fine — region doesn't change behavior, only latency.
+
+The service-role keys are different per project. `SUPABASE_SERVICE_ROLE_KEY` in `.env.local` is the dev key; the prod key lives only in Vercel env vars.
+
+---
+
+## Chat agent tool taxonomy
+
+The `ToolLoopAgent` in `src/lib/board/chat.ts` exposes six tools, split by side-effects:
+
+**Four mutating tools** (R2):
+
+| Tool | Verb |
+|---|---|
+| `createTask` | Insert a new task into a column. |
+| `moveTask` | Resolve by title fragment, move to a different column. |
+| `updateTask` | Resolve by title fragment, patch title/description/priority/status. |
+| `deleteTask` | Resolve by title fragment, permanent delete. |
+
+**Two read-only tools** (R2.5):
+
+| Tool | Verb |
+|---|---|
+| `findTasks` | Keyword + status/source filtered query across the full board (limit 1-25, default 10). |
+| `findMemories` | Semantic search over `public.memories` with the same cosine-0.55 threshold as the per-turn auto-injection. |
+
+**When to reach for read tools vs the injected context.** Every chat turn ships a snapshot of the board (truncated to 12 tasks per column), the next 24h of calendar, the last 48h of email, and the top-5 memory matches for the user's question. That snapshot is fine for "what should I do today?" type questions. The read tools exist for the cases the snapshot doesn't cover:
+
+- A column has more than 12 tasks and the user asks about something in the tail.
+- The user references a keyword that might match across columns — `findTasks` with a `query` filter is more reliable than scanning the snapshot.
+- The user asks "what did I tell you about X?" — `findMemories` lets the agent fetch matches even if the per-turn auto-injection didn't surface them (different question text → different embeddings → different matches).
+
+**Why `findMemories` duplicates the auto-injection.** Different use cases. The auto-injection runs on the *user's current message* once per turn — it's always-on context. `findMemories` runs on a query the *agent* constructs, often in response to an explicit recall request, and can re-query mid-conversation with different phrasings until something matches. The cosine threshold and limits are identical so the two paths return the same kind of results; only the trigger differs.
+
+Mutating tool calls surface as `tool-{name}` parts in the streamed response, the client toasts per call, and `router.refresh()` is fired on success. Read tools surface as tool parts too but `collectToolToasts` ignores them — no toast, no refresh, because nothing on the board changed.
+
+---
+
 ## The Tabby network TLS issue
 
 Local Supabase via Docker is **broken on the Tabby corporate network** and we don't develop against it. The story:

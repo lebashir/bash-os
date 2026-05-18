@@ -8,7 +8,7 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 
 - **Where:** `src/lib/gemini/client.ts` → `CHAT_MODEL_ID`
 - **Why:** Vercel AI Gateway exposes plain `google/gemini-3-flash` (non-preview), but the direct Google Generative Language API only ships the preview alias at our current access tier. We're on the direct API right now.
-- **Status:** verified working on production via the cron endpoint (`6375b6f`, daily-brief route returned `briefTaskId` with no error on 2026-05-19). Chat UI flow not yet visually verified by Bashir.
+- **Status:** verified working on production via the cron endpoint (`6375b6f`, daily-brief route returned the brief with no error on 2026-05-19). Chat UI flow not yet visually verified by Bashir. (R2.5 renamed the response field from `briefTaskId` to `briefId` when briefs moved to their own table.)
 - **Fix path:** when AI Gateway is wired up, change the model string to `'google/gemini-3-flash'` (no SDK change beyond that).
 
 ## 2. AI Gateway swap deferred
