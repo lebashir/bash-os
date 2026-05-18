@@ -1,9 +1,8 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import type { UIMessage } from "ai";
 import { createClient } from "@/lib/supabase/server";
-import { loadHistory, runChatTurn } from "@/lib/board/chat";
-import type { ChatMessage } from "@/lib/supabase/types";
+import { loadHistory } from "@/lib/board/chat";
 
 async function requireUser() {
   const supabase = await createClient();
@@ -14,28 +13,14 @@ async function requireUser() {
   return { supabase, user };
 }
 
-export type SendChatResult = {
-  userMessage: ChatMessage;
-  assistantMessage: ChatMessage;
-  toolActions: Array<{ name: string; result: Record<string, unknown> }>;
-};
-
-export async function listChatMessages(): Promise<ChatMessage[]> {
+export async function listChatUIMessages(): Promise<UIMessage[]> {
   const { supabase, user } = await requireUser();
-  return loadHistory(supabase, user.id, 200);
-}
-
-export async function sendChatMessage(content: string): Promise<SendChatResult> {
-  const { supabase, user } = await requireUser();
-  const turn = await runChatTurn({
-    supabase,
-    userId: user.id,
-    userMessage: content,
-  });
-  if (turn.toolActions.length > 0) {
-    revalidatePath("/board");
-  }
-  return turn;
+  const rows = await loadHistory(supabase, user.id, 200);
+  return rows.map<UIMessage>((m) => ({
+    id: m.id,
+    role: m.role,
+    parts: [{ type: "text", text: m.content }],
+  }));
 }
 
 export async function clearChat(): Promise<void> {

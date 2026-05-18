@@ -9,33 +9,77 @@ import {
   type KeyboardEvent,
 } from "react";
 import { useRouter } from "next/navigation";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
 import { MessageSquare, Save, Send, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import {
-  listChatMessages,
-  sendChatMessage,
-} from "@/app/board/chat-actions";
+import { listChatUIMessages } from "@/app/board/chat-actions";
 import { commitToMemory } from "@/app/board/memories";
-import type { ChatMessage } from "@/lib/supabase/types";
+
+const TOOL_PART_TYPES = [
+  "tool-createTask",
+  "tool-moveTask",
+  "tool-updateTask",
+  "tool-deleteTask",
+] as const;
+type ToolPartType = (typeof TOOL_PART_TYPES)[number];
 
 export function ChatLauncher() {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => setOpen(true)}
+        aria-label="Open chat"
+      >
+        <MessageSquare />
+      </Button>
+      {open ? <ChatDrawer onClose={() => setOpen(false)} /> : null}
+    </>
+  );
+}
+
+type ChatDrawerProps = { onClose: () => void };
+
+function ChatDrawer({ onClose }: ChatDrawerProps) {
+  const router = useRouter();
   const [input, setInput] = useState("");
-  const [sending, startSending] = useTransition();
+  const [loaded, setLoaded] = useState(false);
   const [savingId, startSaving] = useTransition();
   const [pendingSaveId, setPendingSaveId] = useState<string | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
+  const { messages, sendMessage, setMessages, status } = useChat({
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      // Server uses chat_messages in Supabase as history; only the new turn
+      // needs to be sent on the wire.
+      prepareSendMessagesRequest: ({ messages }) => ({
+        body: { message: messages[messages.length - 1] },
+      }),
+    }),
+    onFinish: ({ message }) => {
+      const toolToasts = collectToolToasts(message);
+      if (toolToasts.length > 0) {
+        for (const t of toolToasts) toast.success(t);
+        router.refresh();
+      }
+    },
+    onError: (err) => {
+      toast.error(err.message || "Chat failed");
+    },
+  });
+
+  // Hydrate prior messages once when the drawer opens.
   useEffect(() => {
-    if (!open || loaded) return;
     let cancelled = false;
     (async () => {
       try {
-        const initial = await listChatMessages();
+        const initial = await listChatUIMessages();
         if (!cancelled) {
           setMessages(initial);
           setLoaded(true);
@@ -49,61 +93,22 @@ export function ChatLauncher() {
     return () => {
       cancelled = true;
     };
-  }, [open, loaded]);
+  }, [setMessages]);
 
+  // Pin to bottom as new content streams in.
   useEffect(() => {
-    if (!open) return;
     const el = scrollerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [open, messages]);
+  }, [messages]);
+
+  const isStreaming = status === "submitted" || status === "streaming";
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed || isStreaming) return;
     setInput("");
-    startSending(async () => {
-      try {
-        const { userMessage, assistantMessage, toolActions } =
-          await sendChatMessage(trimmed);
-        setMessages((prev) => [...prev, userMessage, assistantMessage]);
-        if (toolActions.length > 0) {
-          for (const action of toolActions) {
-            const title =
-              typeof action.result?.title === "string"
-                ? action.result.title
-                : "task";
-            switch (action.name) {
-              case "createTask":
-                toast.success(`Created: ${title}`);
-                break;
-              case "moveTask": {
-                const status =
-                  typeof action.result?.status === "string"
-                    ? action.result.status
-                    : "another column";
-                toast.success(`Moved "${title}" → ${status}`);
-                break;
-              }
-              case "updateTask":
-                toast.success(`Updated: ${title}`);
-                break;
-              case "deleteTask":
-                toast.success(`Deleted: ${title}`);
-                break;
-            }
-          }
-          // Pull the server-rendered board so the new tasks appear without
-          // a manual refresh.
-          router.refresh();
-        }
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Send failed",
-        );
-        setInput(trimmed);
-      }
-    });
-  }, [input, sending, router]);
+    sendMessage({ text: trimmed });
+  }, [input, isStreaming, sendMessage]);
 
   function handleKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -112,12 +117,14 @@ export function ChatLauncher() {
     }
   }
 
-  function handleRemember(message: ChatMessage) {
+  function handleRemember(message: UIMessage) {
     if (savingId) return;
+    const text = extractText(message);
+    if (!text) return;
     setPendingSaveId(message.id);
     startSaving(async () => {
       try {
-        await commitToMemory(message.content, ["from-chat"]);
+        await commitToMemory(text, ["from-chat"]);
         toast.success("Saved to memory");
       } catch (error) {
         toast.error(
@@ -130,113 +137,106 @@ export function ChatLauncher() {
   }
 
   return (
-    <>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={() => setOpen(true)}
-        aria-label="Open chat"
-      >
-        <MessageSquare />
-      </Button>
-      {open ? (
-        <div className="fixed inset-0 z-50 flex justify-end">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/20"
-            onClick={() => setOpen(false)}
-            aria-label="Close chat"
-          />
-          <aside className="relative flex h-full w-full max-w-md flex-col border-l bg-background shadow-2xl">
-            <header className="flex items-center justify-between border-b px-4 py-3">
-              <div className="flex items-center gap-2">
-                <MessageSquare className="size-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Bash OS chat</span>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-              >
-                <X />
-              </Button>
-            </header>
-            <div
-              ref={scrollerRef}
-              className="flex-1 overflow-y-auto px-4 py-3 space-y-3"
-            >
-              {!loaded ? (
-                <p className="text-sm text-muted-foreground">Loading…</p>
-              ) : messages.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  Start a conversation. The assistant has read-only context on
-                  your board, today&apos;s calendar, and the last 48h of email.
-                </p>
-              ) : (
-                messages.map((m) => (
-                  <MessageBubble
-                    key={m.id}
-                    message={m}
-                    onRemember={handleRemember}
-                    saving={pendingSaveId === m.id}
-                  />
-                ))
-              )}
-              {sending ? (
-                <p className="text-xs text-muted-foreground">Thinking…</p>
-              ) : null}
-            </div>
-            <footer className="border-t p-3">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKey}
-                placeholder="Ask, draft, plan… Enter to send, Shift+Enter for newline."
-                rows={3}
-                className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50"
-                disabled={sending}
+    <div className="fixed inset-0 z-50 flex justify-end">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/20"
+        onClick={onClose}
+        aria-label="Close chat"
+      />
+      <aside className="relative flex h-full w-full max-w-md flex-col border-l bg-background shadow-2xl">
+        <header className="flex items-center justify-between border-b px-4 py-3">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="size-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Bash OS chat</span>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X />
+          </Button>
+        </header>
+        <div
+          ref={scrollerRef}
+          className="flex-1 overflow-y-auto px-4 py-3 space-y-3"
+        >
+          {!loaded ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : messages.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Start a conversation. The assistant has read-only context on
+              your board, today&apos;s calendar, the last 48h of email, and
+              memories you&apos;ve saved.
+            </p>
+          ) : (
+            messages.map((m) => (
+              <MessageBubble
+                key={m.id}
+                message={m}
+                onRemember={handleRemember}
+                saving={pendingSaveId === m.id}
               />
-              <div className="mt-2 flex justify-end">
-                <Button
-                  size="sm"
-                  onClick={handleSend}
-                  disabled={!input.trim() || sending}
-                >
-                  <Send />
-                  <span>Send</span>
-                </Button>
-              </div>
-            </footer>
-          </aside>
+            ))
+          )}
+          {isStreaming && lastIsUser(messages) ? (
+            <p className="text-xs text-muted-foreground">Thinking…</p>
+          ) : null}
         </div>
-      ) : null}
-    </>
+        <footer className="border-t p-3">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder="Ask, draft, plan… Enter to send, Shift+Enter for newline."
+            rows={3}
+            className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-3 focus:ring-ring/50"
+            disabled={isStreaming}
+          />
+          <div className="mt-2 flex justify-end">
+            <Button
+              size="sm"
+              onClick={handleSend}
+              disabled={!input.trim() || isStreaming}
+            >
+              <Send />
+              <span>Send</span>
+            </Button>
+          </div>
+        </footer>
+      </aside>
+    </div>
   );
 }
 
 type MessageBubbleProps = {
-  message: ChatMessage;
-  onRemember: (m: ChatMessage) => void;
+  message: UIMessage;
+  onRemember: (m: UIMessage) => void;
   saving: boolean;
 };
 
 function MessageBubble({ message, onRemember, saving }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const text = extractText(message);
+  if (!text && message.parts.length === 0) return null;
   return (
     <div
       className={`flex flex-col gap-1 ${isUser ? "items-end" : "items-start"}`}
     >
-      <div
-        className={`max-w-[90%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ${
-          isUser
-            ? "bg-primary text-primary-foreground"
-            : "bg-muted text-foreground"
-        }`}
-      >
-        {message.content}
-      </div>
-      {isUser ? (
+      {text ? (
+        <div
+          className={`max-w-[90%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ${
+            isUser
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-foreground"
+          }`}
+        >
+          {text}
+        </div>
+      ) : null}
+      {isUser && text ? (
         <button
           type="button"
           onClick={() => onRemember(message)}
@@ -249,4 +249,54 @@ function MessageBubble({ message, onRemember, saving }: MessageBubbleProps) {
       ) : null}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function extractText(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("")
+    .trim();
+}
+
+function lastIsUser(messages: UIMessage[]): boolean {
+  return messages[messages.length - 1]?.role === "user";
+}
+
+function collectToolToasts(message: UIMessage): string[] {
+  const toasts: string[] = [];
+  for (const part of message.parts) {
+    if (!isToolUIPart(part)) continue;
+    if (part.state !== "output-available") continue;
+    if (!isKnownToolPart(part.type)) continue;
+    const output = part.output as Record<string, unknown> | null | undefined;
+    const title =
+      typeof output?.title === "string" ? output.title : "task";
+    switch (part.type) {
+      case "tool-createTask":
+        toasts.push(`Created: ${title}`);
+        break;
+      case "tool-moveTask": {
+        const status =
+          typeof output?.status === "string" ? output.status : "another column";
+        toasts.push(`Moved "${title}" → ${status}`);
+        break;
+      }
+      case "tool-updateTask":
+        toasts.push(`Updated: ${title}`);
+        break;
+      case "tool-deleteTask":
+        toasts.push(`Deleted: ${title}`);
+        break;
+    }
+  }
+  return toasts;
+}
+
+function isKnownToolPart(type: string): type is ToolPartType {
+  return (TOOL_PART_TYPES as readonly string[]).includes(type);
 }

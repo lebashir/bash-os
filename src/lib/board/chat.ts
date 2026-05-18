@@ -1,10 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import {
-  type ModelMessage,
-  stepCountIs,
-  tool,
-  ToolLoopAgent,
-} from "ai";
+import { type ModelMessage, stepCountIs, tool, ToolLoopAgent } from "ai";
 import { z } from "zod";
 import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
 import { searchMemories } from "@/lib/board/memory-search";
@@ -12,6 +7,7 @@ import {
   TASK_PRIORITIES,
   TASK_STATUSES,
   type ChatMessage,
+  type ChatRole,
   type Task,
   type TaskStatus,
 } from "@/lib/supabase/types";
@@ -53,7 +49,6 @@ async function resolveTaskByQuery(
   if (!trimmed) {
     throw new Error("Task query is empty.");
   }
-  // PostgREST ilike pattern; escape PostgREST reserved chars conservatively.
   const safe = trimmed.replace(/[%,()]/g, " ");
   const { data, error } = await supabase
     .from("tasks")
@@ -71,24 +66,20 @@ async function resolveTaskByQuery(
     );
   }
 
-  // Prefer exact (case-insensitive) match if present — agents often pass the
-  // full title from context.
   const lower = trimmed.toLowerCase();
   const exact = rows.find((r) => r.title.toLowerCase() === lower);
   if (exact) return exact;
 
   if (rows.length === 1) return rows[0];
 
-  const list = rows
-    .map((r) => `- "${r.title}" [${r.status}]`)
-    .join("\n");
+  const list = rows.map((r) => `- "${r.title}" [${r.status}]`).join("\n");
   throw new Error(
     `Needs clarification: "${trimmed}" matches ${rows.length} tasks:\n${list}\nAsk the user which one they meant.`,
   );
 }
 
 // ---------------------------------------------------------------------------
-// Tool implementations
+// Tool schemas + executors
 // ---------------------------------------------------------------------------
 
 const createTaskInputSchema = z.object({
@@ -244,8 +235,6 @@ async function execUpdateTask(
   if (args.priority !== undefined) patch.priority = args.priority;
   if (args.status !== undefined && args.status !== target.status) {
     patch.status = args.status;
-    // Re-position to end of target column to avoid colliding with an existing
-    // position there.
     const { data: maxPos } = await supabase
       .from("tasks")
       .select("position")
@@ -293,7 +282,11 @@ async function execDeleteTask(
   return target;
 }
 
-function buildAgent(supabase: SupabaseClient, userId: string) {
+// ---------------------------------------------------------------------------
+// Agent factory
+// ---------------------------------------------------------------------------
+
+export function buildAgent(supabase: SupabaseClient, userId: string) {
   return new ToolLoopAgent({
     model: google(CHAT_MODEL_ID),
     instructions: CHAT_SYSTEM_PROMPT,
@@ -333,10 +326,10 @@ function buildAgent(supabase: SupabaseClient, userId: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Tool name registry (mirrored on the client for typed UIMessage parts)
 // ---------------------------------------------------------------------------
 
-const TOOL_NAMES = [
+export const TOOL_NAMES = [
   "createTask",
   "moveTask",
   "updateTask",
@@ -344,102 +337,23 @@ const TOOL_NAMES = [
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-export type ChatTurnInput = {
-  supabase: SupabaseClient;
-  userId: string;
-  userMessage: string;
-};
+// ---------------------------------------------------------------------------
+// Message persistence + history hydration
+// ---------------------------------------------------------------------------
 
-export type ChatTurnOutput = {
-  userMessage: ChatMessage;
-  assistantMessage: ChatMessage;
-  toolActions: Array<{ name: ToolName; result: Record<string, unknown> }>;
-};
-
-export async function runChatTurn(
-  input: ChatTurnInput,
-): Promise<ChatTurnOutput> {
-  const trimmed = input.userMessage.trim();
-  if (!trimmed) throw new Error("Message is empty.");
-
-  const { data: userRow, error: userErr } = await input.supabase
+export async function saveChatMessage(
+  supabase: SupabaseClient,
+  userId: string,
+  role: ChatRole,
+  content: string,
+): Promise<ChatMessage> {
+  const { data, error } = await supabase
     .from("chat_messages")
-    .insert({ user_id: input.userId, role: "user", content: trimmed })
+    .insert({ user_id: userId, role, content })
     .select("*")
     .single();
-  if (userErr) throw new Error(`Failed to save message: ${userErr.message}`);
-
-  const [history, contextLines] = await Promise.all([
-    loadHistory(input.supabase, input.userId),
-    buildContextLines(input.supabase, input.userId, trimmed),
-  ]);
-
-  const messages: ModelMessage[] = [
-    {
-      role: "user",
-      content: `[Current context — refreshed every turn]\n${contextLines.join("\n")}`,
-    },
-    { role: "assistant", content: "Acknowledged. I'll use this context as needed." },
-    ...history.map<ModelMessage>((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content,
-    })),
-  ];
-
-  const agent = buildAgent(input.supabase, input.userId);
-  const result = await agent.generate({ messages });
-
-  const finalText = result.text.trim();
-  if (!finalText) {
-    throw new Error(
-      `Chat returned no text (finish: ${result.finishReason}, steps: ${result.steps.length}).`,
-    );
-  }
-
-  const toolActions = collectToolActions(result.steps);
-
-  const { data: assistantRow, error: assistantErr } = await input.supabase
-    .from("chat_messages")
-    .insert({
-      user_id: input.userId,
-      role: "assistant",
-      content: finalText,
-    })
-    .select("*")
-    .single();
-  if (assistantErr) {
-    throw new Error(`Failed to save reply: ${assistantErr.message}`);
-  }
-
-  return {
-    userMessage: userRow as ChatMessage,
-    assistantMessage: assistantRow as ChatMessage,
-    toolActions,
-  };
-}
-
-type AgentSteps = Awaited<ReturnType<ReturnType<typeof buildAgent>["generate"]>>["steps"];
-
-function isToolName(name: string): name is ToolName {
-  return (TOOL_NAMES as readonly string[]).includes(name);
-}
-
-function collectToolActions(
-  steps: AgentSteps,
-): ChatTurnOutput["toolActions"] {
-  const actions: ChatTurnOutput["toolActions"] = [];
-  for (const step of steps) {
-    for (const tr of step.toolResults) {
-      if (!isToolName(tr.toolName)) continue;
-      // Successful tool results expose `output`; error results don't.
-      if (!("output" in tr) || tr.output === undefined) continue;
-      actions.push({
-        name: tr.toolName,
-        result: tr.output as Record<string, unknown>,
-      });
-    }
-  }
-  return actions;
+  if (error) throw new Error(`Failed to save ${role} message: ${error.message}`);
+  return data as ChatMessage;
 }
 
 export async function loadHistory(
@@ -455,6 +369,36 @@ export async function loadHistory(
     .limit(limit);
   if (error) throw new Error(`Failed to load chat history: ${error.message}`);
   return ((data ?? []) as ChatMessage[]).reverse();
+}
+
+// ---------------------------------------------------------------------------
+// Build the ModelMessage[] payload sent to the agent for a given turn
+// ---------------------------------------------------------------------------
+
+export async function buildAgentMessages(
+  supabase: SupabaseClient,
+  userId: string,
+  userMessage: string,
+): Promise<ModelMessage[]> {
+  const [history, contextLines] = await Promise.all([
+    loadHistory(supabase, userId),
+    buildContextLines(supabase, userId, userMessage),
+  ]);
+
+  return [
+    {
+      role: "user",
+      content: `[Current context — refreshed every turn]\n${contextLines.join("\n")}`,
+    },
+    {
+      role: "assistant",
+      content: "Acknowledged. I'll use this context as needed.",
+    },
+    ...history.map<ModelMessage>((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+  ];
 }
 
 async function buildContextLines(
@@ -493,8 +437,6 @@ async function buildContextLines(
       .gte("created_at", gmailSince)
       .order("created_at", { ascending: false })
       .limit(8),
-    // Memory search failures shouldn't break the chat turn — treat them as
-    // "no memories matched" and log; the assistant can still reply.
     searchMemories(supabase, userMessage, MEMORY_MATCH_LIMIT).catch((err) => {
       console.error("[chat] memory search failed:", err);
       return [];
