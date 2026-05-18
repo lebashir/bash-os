@@ -6,6 +6,19 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { syncAll, type SyncAllResult } from "@/app/board/sync-all";
 
+type AnyConnectorResult = SyncAllResult[keyof SyncAllResult];
+
+type PerAccountEntry = {
+  accountEmail: string;
+  error?: string;
+};
+
+type SuccessShape = {
+  totalCreated: number;
+  totalSkipped: number;
+  perAccount: PerAccountEntry[];
+};
+
 export function SyncButton() {
   const [pending, startTransition] = useTransition();
 
@@ -34,48 +47,56 @@ export function SyncButton() {
   );
 }
 
-function showResultToast({ gmail, calendar }: SyncAllResult) {
+function showResultToast(result: SyncAllResult) {
   const lines: string[] = [];
   const failures: string[] = [];
+  let totalCreated = 0;
 
-  if ("error" in gmail) {
-    failures.push(`Gmail: ${gmail.error}`);
-  } else {
-    lines.push(
-      `Gmail: +${gmail.totalCreated} / skip ${gmail.totalSkipped}`,
-    );
-    for (const r of gmail.perAccount) {
-      if (r.error) failures.push(`Gmail (${r.accountEmail}): ${r.error}`);
+  for (const [label, outcome] of Object.entries(result)) {
+    if (isError(outcome)) {
+      failures.push(`${label}: ${outcome.error}`);
+      continue;
     }
-  }
-
-  if ("error" in calendar) {
-    failures.push(`Calendar: ${calendar.error}`);
-  } else {
+    if (isSkipped(outcome)) {
+      // Don't surface unconfigured connectors as noise.
+      continue;
+    }
+    const success = outcome as SuccessShape;
     lines.push(
-      `Calendar: +${calendar.totalCreated} / skip ${calendar.totalSkipped}`,
+      `${label}: +${success.totalCreated} / skip ${success.totalSkipped}`,
     );
-    for (const r of calendar.perAccount) {
-      if (r.error) failures.push(`Calendar (${r.accountEmail}): ${r.error}`);
+    totalCreated += success.totalCreated;
+    for (const r of success.perAccount) {
+      if (r.error) failures.push(`${label} (${r.accountEmail}): ${r.error}`);
     }
   }
 
   const summary = lines.join("\n");
 
   if (failures.length === 0) {
-    const gmailCreated = "totalCreated" in gmail ? gmail.totalCreated : 0;
-    const calCreated = "totalCreated" in calendar ? calendar.totalCreated : 0;
-    if (gmailCreated === 0 && calCreated === 0) {
-      toast.info("Nothing new to pull in.", { description: summary });
+    if (totalCreated === 0) {
+      toast.info("Nothing new to pull in.", {
+        description: summary || "All configured connectors are up to date.",
+      });
       return;
     }
-    toast.success(`Synced — +${gmailCreated + calCreated} new`, {
-      description: summary,
-    });
+    toast.success(`Synced — +${totalCreated} new`, { description: summary });
     return;
   }
 
   toast.error(`Some sources failed (${failures.length})`, {
     description: `${summary}\n\nErrors:\n${failures.join("\n")}`,
   });
+}
+
+function isError(outcome: AnyConnectorResult): outcome is { error: string } {
+  return typeof outcome === "object" && outcome !== null && "error" in outcome;
+}
+
+function isSkipped(
+  outcome: AnyConnectorResult,
+): outcome is { skipped: "not configured" } {
+  return (
+    typeof outcome === "object" && outcome !== null && "skipped" in outcome
+  );
 }
