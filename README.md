@@ -166,4 +166,4 @@ Vercel Server Actions and Route Handlers read env vars at runtime — adding or 
 
 ## Round status
 
-R1 and R2 are complete. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R3+ plan.
+R1, R2, and R2.5 are complete. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R3+ plan.
