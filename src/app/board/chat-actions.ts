@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { loadHistory, runChatTurn } from "@/lib/board/chat";
 import type { ChatMessage } from "@/lib/supabase/types";
@@ -13,21 +14,28 @@ async function requireUser() {
   return { supabase, user };
 }
 
+export type SendChatResult = {
+  userMessage: ChatMessage;
+  assistantMessage: ChatMessage;
+  toolActions: Array<{ name: string; result: Record<string, unknown> }>;
+};
+
 export async function listChatMessages(): Promise<ChatMessage[]> {
   const { supabase, user } = await requireUser();
   return loadHistory(supabase, user.id, 200);
 }
 
-export async function sendChatMessage(content: string): Promise<{
-  userMessage: ChatMessage;
-  assistantMessage: ChatMessage;
-}> {
+export async function sendChatMessage(content: string): Promise<SendChatResult> {
   const { supabase, user } = await requireUser();
-  return runChatTurn({
+  const turn = await runChatTurn({
     supabase,
     userId: user.id,
     userMessage: content,
   });
+  if (turn.toolActions.length > 0) {
+    revalidatePath("/board");
+  }
+  return turn;
 }
 
 export async function clearChat(): Promise<void> {

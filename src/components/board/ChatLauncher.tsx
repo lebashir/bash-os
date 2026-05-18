@@ -8,6 +8,7 @@ import {
   useTransition,
   type KeyboardEvent,
 } from "react";
+import { useRouter } from "next/navigation";
 import { MessageSquare, Save, Send, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ import { commitToMemory } from "@/app/board/memories";
 import type { ChatMessage } from "@/lib/supabase/types";
 
 export function ChatLauncher() {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -61,8 +63,23 @@ export function ChatLauncher() {
     setInput("");
     startSending(async () => {
       try {
-        const { userMessage, assistantMessage } = await sendChatMessage(trimmed);
+        const { userMessage, assistantMessage, toolActions } =
+          await sendChatMessage(trimmed);
         setMessages((prev) => [...prev, userMessage, assistantMessage]);
+        if (toolActions.length > 0) {
+          for (const action of toolActions) {
+            if (action.name === "createTask") {
+              const title =
+                typeof action.result?.title === "string"
+                  ? action.result.title
+                  : "task";
+              toast.success(`Created task: ${title}`);
+            }
+          }
+          // Pull the server-rendered board so the new tasks appear without
+          // a manual refresh.
+          router.refresh();
+        }
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Send failed",
@@ -70,7 +87,7 @@ export function ChatLauncher() {
         setInput(trimmed);
       }
     });
-  }, [input, sending]);
+  }, [input, sending, router]);
 
   function handleKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
