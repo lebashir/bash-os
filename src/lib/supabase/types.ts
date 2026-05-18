@@ -29,6 +29,7 @@ export type Task = {
   title: string;
   status: TaskStatus;
   source: TaskSource;
+  source_account: string | null;
   source_id: string | null;
   description: string | null;
   priority: TaskPriority | null;
@@ -47,6 +48,7 @@ export type ConnectorToken = {
   id: string;
   user_id: string;
   provider: ConnectorProvider;
+  account_email: string | null;
   access_token: string;
   refresh_token: string | null;
   expires_at: string | null;

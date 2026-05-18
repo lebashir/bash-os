@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+import { GOOGLE_TOKEN_URL, readGoogleOAuthCredentials } from "./oauth";
 
 // Refresh proactively while the stored token still has a little time left,
 // to avoid a race where it expires mid-request.
@@ -22,12 +21,14 @@ type GoogleRefreshResponse = {
 export async function getGoogleAccessToken(
   supabase: SupabaseClient,
   userId: string,
+  accountEmail: string,
 ): Promise<string> {
   const { data, error } = await supabase
     .from("connector_tokens")
     .select("access_token, refresh_token, expires_at")
     .eq("user_id", userId)
     .eq("provider", "google")
+    .eq("account_email", accountEmail)
     .maybeSingle();
 
   if (error) {
@@ -35,7 +36,7 @@ export async function getGoogleAccessToken(
   }
   if (!data) {
     throw new Error(
-      "No Google connector token on file. Sign out and sign back in to grant Gmail access.",
+      `No Google connector token on file for ${accountEmail}. Connect the account again.`,
     );
   }
 
@@ -47,7 +48,7 @@ export async function getGoogleAccessToken(
 
   if (!stored.refresh_token) {
     throw new Error(
-      "Google token expired and no refresh token is stored. Sign out and sign back in.",
+      `Google token expired for ${accountEmail} and no refresh token is stored. Reconnect the account.`,
     );
   }
 
@@ -63,7 +64,8 @@ export async function getGoogleAccessToken(
       expires_at: expiresAt,
     })
     .eq("user_id", userId)
-    .eq("provider", "google");
+    .eq("provider", "google")
+    .eq("account_email", accountEmail);
 
   if (updateError) {
     throw new Error(`Failed to persist refreshed token: ${updateError.message}`);
@@ -81,13 +83,7 @@ function isExpired(expiresAt: string | null): boolean {
 async function refreshGoogleToken(
   refreshToken: string,
 ): Promise<GoogleRefreshResponse> {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      "GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET not configured.",
-    );
-  }
+  const { clientId, clientSecret } = readGoogleOAuthCredentials();
 
   const body = new URLSearchParams({
     client_id: clientId,

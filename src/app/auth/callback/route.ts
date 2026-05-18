@@ -41,16 +41,19 @@ async function persistGoogleProviderTokens(
     Date.now() + GOOGLE_ACCESS_TOKEN_TTL_SECONDS * 1000,
   ).toISOString();
 
+  const accountEmail = session.user.email ?? null;
+
   // Google only returns refresh_token on the very first consent with
   // access_type=offline. On re-auth we may get only an access_token — keep the
   // previously-stored refresh_token in that case.
   let refreshToken: string | null = session.provider_refresh_token ?? null;
-  if (!refreshToken) {
+  if (!refreshToken && accountEmail) {
     const { data } = await supabase
       .from("connector_tokens")
       .select("refresh_token")
       .eq("user_id", session.user.id)
       .eq("provider", "google")
+      .eq("account_email", accountEmail)
       .maybeSingle();
     refreshToken = data?.refresh_token ?? null;
   }
@@ -59,10 +62,11 @@ async function persistGoogleProviderTokens(
     {
       user_id: session.user.id,
       provider: "google",
+      account_email: accountEmail,
       access_token: session.provider_token,
       refresh_token: refreshToken,
       expires_at: expiresAt,
     },
-    { onConflict: "user_id,provider" },
+    { onConflict: "user_id,provider,account_email" },
   );
 }

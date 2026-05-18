@@ -1,10 +1,17 @@
 import { redirect } from "next/navigation";
+import { AccountMenu } from "@/components/board/AccountMenu";
 import { Board } from "@/components/board/Board";
+import { FlashToaster } from "@/components/board/FlashToaster";
 import { SyncGmailButton } from "@/components/board/SyncGmailButton";
 import { createClient } from "@/lib/supabase/server";
 import { listTasks, seedIfEmpty } from "./actions";
+import { listConnectedAccounts } from "./connectors";
 
-export default async function BoardPage() {
+type BoardPageProps = {
+  searchParams: Promise<{ connected?: string; error?: string }>;
+};
+
+export default async function BoardPage({ searchParams }: BoardPageProps) {
   const supabase = await createClient();
   const {
     data: { user },
@@ -13,7 +20,11 @@ export default async function BoardPage() {
   if (!user) redirect("/login");
 
   await seedIfEmpty();
-  const tasks = await listTasks();
+  const [tasks, accounts, flash] = await Promise.all([
+    listTasks(),
+    listConnectedAccounts(),
+    searchParams,
+  ]);
 
   return (
     <main className="min-h-screen bg-background flex flex-col">
@@ -21,12 +32,14 @@ export default async function BoardPage() {
         <h1 className="text-lg font-semibold">Bash OS</h1>
         <div className="flex items-center gap-3">
           <SyncGmailButton />
-          <span className="text-sm text-muted-foreground truncate max-w-[40ch]">
-            {user.email}
-          </span>
+          <AccountMenu
+            userEmail={user.email ?? "(no email)"}
+            accounts={accounts}
+          />
         </div>
       </header>
       <Board initialTasks={tasks} />
+      <FlashToaster connected={flash.connected} error={flash.error} />
     </main>
   );
 }
