@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  type ModelMessage,
+  stepCountIs,
+  tool,
+  ToolLoopAgent,
+} from "ai";
 import { z } from "zod";
-import { GEMINI_API_BASE } from "@/lib/gemini/client";
+import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
 import {
   TASK_PRIORITIES,
   TASK_STATUSES,
@@ -12,8 +18,7 @@ import {
 const CHAT_HISTORY_LIMIT = 20;
 const CALENDAR_HORIZON_HOURS = 24;
 const GMAIL_LOOKBACK_HOURS = 48;
-const CHAT_MODEL = "gemini-2.5-flash";
-const MAX_TOOL_LOOPS = 5;
+const MAX_TOOL_STEPS = 5;
 
 const CHAT_SYSTEM_PROMPT = `You are Bash OS's chat assistant — a calm, sharp helper for Bashir's personal life-OS.
 You have visibility into the current kanban board, today's calendar events, and recently-synced emails. Use this context when it's relevant; ignore it when it isn't.
@@ -25,50 +30,30 @@ When the user asks for next-action proposals, name specific items by their title
 // Tools
 // ---------------------------------------------------------------------------
 
-const CREATE_TASK_TOOL = {
-  name: "createTask",
-  description:
-    "Add a new task to Bashir's kanban board. Use whenever the user asks you to capture, add, jot, or queue something.",
-  parameters: {
-    type: "object",
-    properties: {
-      title: { type: "string", description: "Short title (under 100 chars)" },
-      description: {
-        type: "string",
-        description: "Optional longer detail or context",
-      },
-      status: {
-        type: "string",
-        enum: [...TASK_STATUSES],
-        description:
-          "Which kanban column. Default 'things to think about' if unclear.",
-      },
-      priority: {
-        type: "string",
-        enum: [...TASK_PRIORITIES],
-        description: "Optional priority",
-      },
-    },
-    required: ["title"],
-  },
-} as const;
-
-const createTaskArgsSchema = z.object({
-  title: z.string().trim().min(1).max(500),
-  description: z.string().trim().max(10_000).optional(),
-  status: z.enum(TASK_STATUSES).optional(),
-  priority: z.enum(TASK_PRIORITIES).optional(),
+const createTaskInputSchema = z.object({
+  title: z.string().trim().min(1).max(500).describe("Short title (under 100 chars)"),
+  description: z
+    .string()
+    .trim()
+    .max(10_000)
+    .optional()
+    .describe("Optional longer detail or context"),
+  status: z
+    .enum(TASK_STATUSES)
+    .optional()
+    .describe("Which kanban column. Default 'things to think about' if unclear."),
+  priority: z.enum(TASK_PRIORITIES).optional().describe("Optional priority"),
 });
 
-type ToolName = "createTask";
+type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
+type CreateTaskResult = { id: string; title: string; status: TaskStatus };
 
 async function execCreateTask(
   supabase: SupabaseClient,
   userId: string,
-  args: unknown,
-): Promise<{ id: string; title: string; status: TaskStatus }> {
-  const parsed = createTaskArgsSchema.parse(args);
-  const status: TaskStatus = parsed.status ?? "things to think about";
+  args: CreateTaskInput,
+): Promise<CreateTaskResult> {
+  const status: TaskStatus = args.status ?? "things to think about";
 
   const { data: maxPos } = await supabase
     .from("tasks")
@@ -84,67 +69,44 @@ async function execCreateTask(
     .from("tasks")
     .insert({
       user_id: userId,
-      title: parsed.title,
-      description: parsed.description ?? null,
+      title: args.title,
+      description: args.description ?? null,
       status,
-      priority: parsed.priority ?? null,
+      priority: args.priority ?? null,
       position,
     })
     .select("id, title, status")
     .single();
   if (error) throw new Error(`createTask: ${error.message}`);
-  return data as { id: string; title: string; status: TaskStatus };
+  return data as CreateTaskResult;
 }
 
-// ---------------------------------------------------------------------------
-// Gemini wire format helpers
-// ---------------------------------------------------------------------------
-
-type TextPart = { text: string };
-type FunctionCallPart = {
-  functionCall: { name: string; args: Record<string, unknown> };
-};
-type FunctionResponsePart = {
-  functionResponse: { name: string; response: Record<string, unknown> };
-};
-type ContentPart = TextPart | FunctionCallPart | FunctionResponsePart;
-type Content = { role: "user" | "model"; parts: ContentPart[] };
-
-type GenerateResponse = {
-  candidates?: Array<{
-    content?: { parts?: ContentPart[]; role?: string };
-    finishReason?: string;
-  }>;
-  promptFeedback?: { blockReason?: string };
-};
-
-async function callGemini(body: unknown): Promise<GenerateResponse> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY not configured.");
-  const url = `${GEMINI_API_BASE}/models/${CHAT_MODEL}:generateContent`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-    body: JSON.stringify(body),
-    cache: "no-store",
+function buildAgent(supabase: SupabaseClient, userId: string) {
+  return new ToolLoopAgent({
+    model: google(CHAT_MODEL_ID),
+    instructions: CHAT_SYSTEM_PROMPT,
+    stopWhen: stepCountIs(MAX_TOOL_STEPS),
+    temperature: 0.6,
+    maxOutputTokens: 1500,
+    providerOptions: {
+      google: { thinkingConfig: { thinkingBudget: 0 } },
+    },
+    tools: {
+      createTask: tool({
+        description:
+          "Add a new task to Bashir's kanban board. Use whenever the user asks you to capture, add, jot, or queue something.",
+        inputSchema: createTaskInputSchema,
+        execute: (args) => execCreateTask(supabase, userId, args),
+      }),
+    },
   });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Gemini chat ${response.status}: ${detail}`);
-  }
-  return (await response.json()) as GenerateResponse;
-}
-
-function isFunctionCall(part: ContentPart): part is FunctionCallPart {
-  return "functionCall" in part;
-}
-function isText(part: ContentPart): part is TextPart {
-  return "text" in part;
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+type ToolName = "createTask";
 
 export type ChatTurnInput = {
   supabase: SupabaseClient;
@@ -176,104 +138,29 @@ export async function runChatTurn(
     buildContextLines(input.supabase, input.userId),
   ]);
 
-  const contents: Content[] = [
+  const messages: ModelMessage[] = [
     {
       role: "user",
-      parts: [
-        {
-          text: `[Current context — refreshed every turn]\n${contextLines.join("\n")}`,
-        },
-      ],
+      content: `[Current context — refreshed every turn]\n${contextLines.join("\n")}`,
     },
-    {
-      role: "model",
-      parts: [{ text: "Acknowledged. I'll use this context as needed." }],
-    },
-    ...history.map<Content>((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
+    { role: "assistant", content: "Acknowledged. I'll use this context as needed." },
+    ...history.map<ModelMessage>((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
     })),
   ];
 
-  const toolActions: Array<{ name: ToolName; result: Record<string, unknown> }> = [];
-  let finalText: string | null = null;
+  const agent = buildAgent(input.supabase, input.userId);
+  const result = await agent.generate({ messages });
 
-  for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-    const response = await callGemini({
-      contents,
-      systemInstruction: { parts: [{ text: CHAT_SYSTEM_PROMPT }] },
-      tools: [{ functionDeclarations: [CREATE_TASK_TOOL] }],
-      generationConfig: {
-        maxOutputTokens: 1500,
-        temperature: 0.6,
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    });
-
-    const blockReason = response.promptFeedback?.blockReason;
-    if (blockReason) throw new Error(`Gemini blocked: ${blockReason}`);
-
-    const candidate = response.candidates?.[0];
-    const parts = candidate?.content?.parts ?? [];
-    const calls = parts.filter(isFunctionCall);
-    const textParts = parts.filter(isText);
-
-    if (calls.length === 0) {
-      finalText = textParts
-        .map((p) => p.text)
-        .join("")
-        .trim();
-      if (!finalText) {
-        const reason = candidate?.finishReason ?? "no candidates";
-        throw new Error(`Gemini returned no content (finish: ${reason}).`);
-      }
-      break;
-    }
-
-    // Append the model's function-call parts to the conversation, then
-    // resolve each tool and append the corresponding functionResponses.
-    contents.push({ role: "model", parts: calls });
-    const responseParts: FunctionResponsePart[] = [];
-    for (const callPart of calls) {
-      const call = callPart.functionCall;
-      try {
-        if (call.name === "createTask") {
-          const result = await execCreateTask(
-            input.supabase,
-            input.userId,
-            call.args,
-          );
-          toolActions.push({ name: "createTask", result });
-          responseParts.push({
-            functionResponse: { name: call.name, response: result },
-          });
-        } else {
-          responseParts.push({
-            functionResponse: {
-              name: call.name,
-              response: { error: `Unknown tool: ${call.name}` },
-            },
-          });
-        }
-      } catch (e) {
-        responseParts.push({
-          functionResponse: {
-            name: call.name,
-            response: {
-              error: e instanceof Error ? e.message : "Tool execution failed",
-            },
-          },
-        });
-      }
-    }
-    contents.push({ role: "user", parts: responseParts });
-  }
-
+  const finalText = result.text.trim();
   if (!finalText) {
     throw new Error(
-      `Gemini tool-call loop exceeded ${MAX_TOOL_LOOPS} iterations without a text reply.`,
+      `Chat returned no text (finish: ${result.finishReason}, steps: ${result.steps.length}).`,
     );
   }
+
+  const toolActions = collectToolActions(result.steps);
 
   const { data: assistantRow, error: assistantErr } = await input.supabase
     .from("chat_messages")
@@ -293,6 +180,25 @@ export async function runChatTurn(
     assistantMessage: assistantRow as ChatMessage,
     toolActions,
   };
+}
+
+type AgentSteps = Awaited<ReturnType<ReturnType<typeof buildAgent>["generate"]>>["steps"];
+
+function collectToolActions(
+  steps: AgentSteps,
+): ChatTurnOutput["toolActions"] {
+  const actions: ChatTurnOutput["toolActions"] = [];
+  for (const step of steps) {
+    for (const tr of step.toolResults) {
+      if (tr.toolName === "createTask" && !("error" in tr && tr.error)) {
+        actions.push({
+          name: "createTask",
+          result: tr.output as Record<string, unknown>,
+        });
+      }
+    }
+  }
+  return actions;
 }
 
 export async function loadHistory(

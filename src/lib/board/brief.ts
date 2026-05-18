@@ -1,5 +1,6 @@
+import { generateText } from "ai";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { geminiGenerate } from "@/lib/gemini/client";
+import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
 import { TASK_STATUSES, type Task, type TaskStatus } from "@/lib/supabase/types";
 
 const BRIEF_SYSTEM_PROMPT = `You are a calm, sharp morning briefer for Bash OS, a single-user life-OS kanban.
@@ -22,13 +23,21 @@ export async function generateAndStoreBrief(
   now: Date = new Date(),
 ): Promise<{ taskId: string; preview: string }> {
   const context = await assembleContext(supabase, userId, now);
-  const briefText = await geminiGenerate({
-    systemInstruction: BRIEF_SYSTEM_PROMPT,
-    userPrompt: renderContext(context),
+  const { text: briefText, finishReason } = await generateText({
+    model: google(CHAT_MODEL_ID),
+    system: BRIEF_SYSTEM_PROMPT,
+    prompt: renderContext(context),
     maxOutputTokens: 600,
     temperature: 0.5,
-    thinkingBudget: 0,
+    providerOptions: {
+      google: { thinkingConfig: { thinkingBudget: 0 } },
+    },
   });
+  if (finishReason !== "stop") {
+    throw new Error(
+      `Brief truncated (${finishReason}). Raise maxOutputTokens or lower thinkingBudget.`,
+    );
+  }
 
   const briefTitle = `Daily brief — ${context.today}`;
 
