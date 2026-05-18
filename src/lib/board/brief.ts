@@ -24,8 +24,9 @@ export async function generateAndStoreBrief(
   const briefText = await geminiGenerate({
     systemInstruction: BRIEF_SYSTEM_PROMPT,
     userPrompt: renderContext(context),
-    maxOutputTokens: 400,
+    maxOutputTokens: 600,
     temperature: 0.5,
+    thinkingBudget: 0,
   });
 
   const briefPosition = await leadingPosition(supabase, userId, "todays plate");

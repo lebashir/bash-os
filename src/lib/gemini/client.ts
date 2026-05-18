@@ -20,6 +20,10 @@ export type GeminiGenerateInput = {
   model?: string;
   maxOutputTokens?: number;
   temperature?: number;
+  // Gemini 2.5 models think before answering by default; thinking tokens
+  // count against maxOutputTokens. Pass a budget (0 = disabled) when the
+  // task doesn't need reasoning — e.g. short summarization.
+  thinkingBudget?: number;
 };
 
 export async function geminiGenerate(
@@ -37,12 +41,17 @@ export async function geminiGenerate(
     { role: "user", parts: [{ text: input.userPrompt }] },
   ];
 
+  const generationConfig: Record<string, unknown> = {
+    maxOutputTokens: input.maxOutputTokens ?? 2048,
+    temperature: input.temperature ?? 0.4,
+  };
+  if (input.thinkingBudget !== undefined) {
+    generationConfig.thinkingConfig = { thinkingBudget: input.thinkingBudget };
+  }
+
   const body: Record<string, unknown> = {
     contents,
-    generationConfig: {
-      maxOutputTokens: input.maxOutputTokens ?? 1024,
-      temperature: input.temperature ?? 0.4,
-    },
+    generationConfig,
   };
   if (input.systemInstruction) {
     body.systemInstruction = { parts: [{ text: input.systemInstruction }] };
@@ -69,12 +78,19 @@ export async function geminiGenerate(
     throw new Error(`Gemini blocked the prompt: ${blockReason}`);
   }
 
-  const text = data.candidates?.[0]?.content?.parts
+  const candidate = data.candidates?.[0];
+  const text = candidate?.content?.parts
     ?.map((p) => p.text ?? "")
     .join("")
     .trim();
   if (!text) {
-    throw new Error("Gemini returned an empty response.");
+    const reason = candidate?.finishReason ?? "no candidates";
+    throw new Error(`Gemini returned an empty response (finish: ${reason}).`);
+  }
+  if (candidate?.finishReason && candidate.finishReason !== "STOP") {
+    throw new Error(
+      `Gemini output was truncated (finish: ${candidate.finishReason}). Raise maxOutputTokens or lower thinkingBudget.`,
+    );
   }
   return text;
 }
