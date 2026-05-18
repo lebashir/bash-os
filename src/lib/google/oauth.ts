@@ -10,6 +10,7 @@ export const GOOGLE_CONNECTOR_SCOPES = [
   "email",
   "profile",
   "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/calendar.readonly",
 ];
 
 export const OAUTH_STATE_COOKIE = "bashos-google-oauth-state";

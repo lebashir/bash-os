@@ -20,7 +20,8 @@ export async function signInWithGoogle() {
     provider: "google",
     options: {
       redirectTo: `${baseUrl}/auth/callback`,
-      scopes: "openid email profile https://www.googleapis.com/auth/gmail.readonly",
+      scopes:
+        "openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly",
       queryParams: {
         access_type: "offline",
         prompt: "consent",

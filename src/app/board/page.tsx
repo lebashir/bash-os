@@ -2,9 +2,9 @@ import { redirect } from "next/navigation";
 import { AccountMenu } from "@/components/board/AccountMenu";
 import { Board } from "@/components/board/Board";
 import { FlashToaster } from "@/components/board/FlashToaster";
-import { SyncGmailButton } from "@/components/board/SyncGmailButton";
+import { SyncButton } from "@/components/board/SyncButton";
 import { createClient } from "@/lib/supabase/server";
-import { listTasks, seedIfEmpty } from "./actions";
+import { listTasks } from "./actions";
 import { listConnectedAccounts } from "./connectors";
 
 type BoardPageProps = {
@@ -19,7 +19,6 @@ export default async function BoardPage({ searchParams }: BoardPageProps) {
 
   if (!user) redirect("/login");
 
-  await seedIfEmpty();
   const [tasks, accounts, flash] = await Promise.all([
     listTasks(),
     listConnectedAccounts(),
@@ -31,7 +30,7 @@ export default async function BoardPage({ searchParams }: BoardPageProps) {
       <header className="px-6 py-4 border-b flex items-center justify-between gap-4">
         <h1 className="text-lg font-semibold">Bash OS</h1>
         <div className="flex items-center gap-3">
-          <SyncGmailButton />
+          <SyncButton />
           <AccountMenu
             userEmail={user.email ?? "(no email)"}
             accounts={accounts}

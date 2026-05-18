@@ -11,6 +11,7 @@ type BriefContext = {
   today: string;
   countsByStatus: Record<TaskStatus, number>;
   recentGmailTasks: Pick<Task, "title" | "description" | "created_at">[];
+  upcomingCalendarEvents: Pick<Task, "title" | "description" | "due_date">[];
   activePlateTasks: Pick<Task, "title" | "priority">[];
   thingsToThinkAboutSample: Pick<Task, "title">[];
 };
@@ -57,8 +58,9 @@ async function assembleContext(
   now: Date,
 ): Promise<BriefContext> {
   const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  const horizon = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-  const [allTasks, recentGmail] = await Promise.all([
+  const [allTasks, recentGmail, upcomingEvents] = await Promise.all([
     supabase
       .from("tasks")
       .select("title, status, priority, description, created_at")
@@ -72,6 +74,15 @@ async function assembleContext(
       .gte("created_at", since)
       .order("created_at", { ascending: false })
       .limit(12),
+    supabase
+      .from("tasks")
+      .select("title, description, due_date")
+      .eq("user_id", userId)
+      .eq("source", "calendar")
+      .gte("due_date", now.toISOString())
+      .lte("due_date", horizon)
+      .order("due_date", { ascending: true })
+      .limit(15),
   ]);
 
   if (allTasks.error) {
@@ -80,6 +91,11 @@ async function assembleContext(
   if (recentGmail.error) {
     throw new Error(
       `Brief: failed to read recent Gmail tasks: ${recentGmail.error.message}`,
+    );
+  }
+  if (upcomingEvents.error) {
+    throw new Error(
+      `Brief: failed to read upcoming calendar events: ${upcomingEvents.error.message}`,
     );
   }
 
@@ -103,6 +119,8 @@ async function assembleContext(
     today: formatDate(now),
     countsByStatus,
     recentGmailTasks: (recentGmail.data ?? []) as BriefContext["recentGmailTasks"],
+    upcomingCalendarEvents: (upcomingEvents.data ??
+      []) as BriefContext["upcomingCalendarEvents"],
     activePlateTasks,
     thingsToThinkAboutSample,
   };
@@ -132,6 +150,22 @@ function renderContext(ctx: BriefContext): string {
     lines.push("Sampled from 'things to think about':");
     for (const t of ctx.thingsToThinkAboutSample) {
       lines.push(`  - ${t.title}`);
+    }
+    lines.push("");
+  }
+
+  if (ctx.upcomingCalendarEvents.length > 0) {
+    lines.push("Calendar events in the next 24 hours:");
+    for (const e of ctx.upcomingCalendarEvents) {
+      const when = e.due_date
+        ? new Date(e.due_date).toLocaleString(undefined, {
+            weekday: "short",
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true,
+          })
+        : "time unknown";
+      lines.push(`  - ${e.title} (${when})`);
     }
     lines.push("");
   }

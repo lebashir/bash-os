@@ -1,14 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { syncGmailForUser } from "@/lib/board/gmail-sync";
+import { syncCalendarForUser } from "@/lib/board/calendar-sync";
 import { generateAndStoreBrief } from "@/lib/board/brief";
 
 export const dynamic = "force-dynamic";
 
 type UserBriefSummary = {
   userId: string;
-  syncedCreated: number;
-  syncedSkipped: number;
+  gmailCreated: number;
+  gmailSkipped: number;
+  calendarCreated: number;
+  calendarSkipped: number;
   syncErrors: string[];
   briefTaskId?: string;
   briefError?: string;
@@ -42,21 +45,40 @@ export async function GET(request: NextRequest) {
   for (const userId of userIds) {
     const summary: UserBriefSummary = {
       userId,
-      syncedCreated: 0,
-      syncedSkipped: 0,
+      gmailCreated: 0,
+      gmailSkipped: 0,
+      calendarCreated: 0,
+      calendarSkipped: 0,
       syncErrors: [],
     };
 
-    try {
-      const syncResult = await syncGmailForUser(admin, userId);
-      summary.syncedCreated = syncResult.totalCreated;
-      summary.syncedSkipped = syncResult.totalSkipped;
-      summary.syncErrors = syncResult.perAccount
-        .filter((r) => r.error)
-        .map((r) => `${r.accountEmail}: ${r.error}`);
-    } catch (error) {
+    const [gmailOutcome, calendarOutcome] = await Promise.allSettled([
+      syncGmailForUser(admin, userId),
+      syncCalendarForUser(admin, userId),
+    ]);
+
+    if (gmailOutcome.status === "fulfilled") {
+      summary.gmailCreated = gmailOutcome.value.totalCreated;
+      summary.gmailSkipped = gmailOutcome.value.totalSkipped;
+      for (const r of gmailOutcome.value.perAccount) {
+        if (r.error) summary.syncErrors.push(`Gmail/${r.accountEmail}: ${r.error}`);
+      }
+    } else {
       summary.syncErrors.push(
-        error instanceof Error ? error.message : "Unknown sync error",
+        `Gmail: ${gmailOutcome.reason instanceof Error ? gmailOutcome.reason.message : String(gmailOutcome.reason)}`,
+      );
+    }
+
+    if (calendarOutcome.status === "fulfilled") {
+      summary.calendarCreated = calendarOutcome.value.totalCreated;
+      summary.calendarSkipped = calendarOutcome.value.totalSkipped;
+      for (const r of calendarOutcome.value.perAccount) {
+        if (r.error)
+          summary.syncErrors.push(`Calendar/${r.accountEmail}: ${r.error}`);
+      }
+    } else {
+      summary.syncErrors.push(
+        `Calendar: ${calendarOutcome.reason instanceof Error ? calendarOutcome.reason.message : String(calendarOutcome.reason)}`,
       );
     }
 

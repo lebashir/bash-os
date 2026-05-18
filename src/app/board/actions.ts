@@ -7,7 +7,6 @@ import {
   TASK_PRIORITIES,
   TASK_STATUSES,
   type Task,
-  type TaskStatus,
 } from "@/lib/supabase/types";
 
 const statusSchema = z.enum(TASK_STATUSES);
@@ -61,57 +60,6 @@ export async function listTasks(): Promise<Task[]> {
     throw new Error(`Failed to load tasks: ${error.message}`);
   }
   return (data ?? []) as Task[];
-}
-
-export async function seedIfEmpty(): Promise<void> {
-  const { supabase, user } = await requireUser();
-
-  const { count, error: countError } = await supabase
-    .from("tasks")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", user.id);
-
-  if (countError) {
-    throw new Error(`Seed precheck failed: ${countError.message}`);
-  }
-  if ((count ?? 0) > 0) return;
-
-  const seeds = [
-    {
-      user_id: user.id,
-      title: "Sketch the memory tab UX",
-      description: "Where does ambient context live? Tabs vs sidebar.",
-      status: "things to think about" as TaskStatus,
-      position: 0,
-    },
-    {
-      user_id: user.id,
-      title: "Decide on a daily review ritual",
-      description: "Morning brief vs end-of-day digest.",
-      status: "things to think about" as TaskStatus,
-      position: 1,
-    },
-    {
-      user_id: user.id,
-      title: "Wire up Google Calendar in R2",
-      description: "Read events for today, surface in the brief.",
-      status: "on the menu" as TaskStatus,
-      position: 0,
-    },
-    {
-      user_id: user.id,
-      title: "Ship Bash OS Round 1",
-      description: "Kanban + auth. The foundation.",
-      status: "todays plate" as TaskStatus,
-      priority: "high",
-      position: 0,
-    },
-  ];
-
-  const { error } = await supabase.from("tasks").insert(seeds);
-  if (error) {
-    throw new Error(`Seed insert failed: ${error.message}`);
-  }
 }
 
 export async function createTask(input: TaskFormInput): Promise<Task> {
