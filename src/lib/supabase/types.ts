@@ -35,6 +35,7 @@ export type Task = {
   priority: TaskPriority | null;
   due_date: string | null;
   position: number;
+  importance: number | null;
   created_at: string;
   updated_at: string;
 };

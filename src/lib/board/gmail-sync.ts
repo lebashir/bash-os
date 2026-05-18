@@ -1,6 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getGoogleAccessToken } from "@/lib/google/token";
 import type { TaskStatus } from "@/lib/supabase/types";
+import {
+  IMPORTANCE_THRESHOLD,
+  scoreEmailImportance,
+  type EmailScore,
+} from "./email-importance";
 
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GMAIL_QUERY = "is:unread in:inbox";
@@ -11,6 +16,7 @@ export type SyncGmailAccountResult = {
   accountEmail: string;
   created: number;
   skipped: number;
+  filtered: number;
   error?: string;
 };
 
@@ -18,6 +24,14 @@ export type SyncGmailResult = {
   perAccount: SyncGmailAccountResult[];
   totalCreated: number;
   totalSkipped: number;
+  totalFiltered: number;
+};
+
+export type SyncGmailOptions = {
+  // When true, low-importance messages are admitted with their score and a
+  // visible [filtered:N] title prefix instead of being silently dropped. Used
+  // by the /board?show_filtered=1 query param for spot-checking the rubric.
+  showFiltered?: boolean;
 };
 
 type GmailListResponse = {
@@ -35,6 +49,7 @@ type GmailMessage = {
 export async function syncGmailForUser(
   supabase: SupabaseClient,
   userId: string,
+  options: SyncGmailOptions = {},
 ): Promise<SyncGmailResult> {
   const { data: tokens, error: tokensError } = await supabase
     .from("connector_tokens")
@@ -61,13 +76,19 @@ export async function syncGmailForUser(
   for (const row of tokens) {
     const accountEmail = row.account_email as string;
     try {
-      const accountResult = await syncOneAccount(supabase, userId, accountEmail);
+      const accountResult = await syncOneAccount(
+        supabase,
+        userId,
+        accountEmail,
+        options,
+      );
       perAccount.push(accountResult);
     } catch (error) {
       perAccount.push({
         accountEmail,
         created: 0,
         skipped: 0,
+        filtered: 0,
         error: error instanceof Error ? error.message : "Unknown error",
       });
     }
@@ -75,14 +96,16 @@ export async function syncGmailForUser(
 
   const totalCreated = perAccount.reduce((sum, r) => sum + r.created, 0);
   const totalSkipped = perAccount.reduce((sum, r) => sum + r.skipped, 0);
+  const totalFiltered = perAccount.reduce((sum, r) => sum + r.filtered, 0);
 
-  return { perAccount, totalCreated, totalSkipped };
+  return { perAccount, totalCreated, totalSkipped, totalFiltered };
 }
 
 async function syncOneAccount(
   supabase: SupabaseClient,
   userId: string,
   accountEmail: string,
+  options: SyncGmailOptions,
 ): Promise<SyncGmailAccountResult> {
   const accessToken = await getGoogleAccessToken(supabase, userId, accountEmail);
 
@@ -93,13 +116,35 @@ async function syncOneAccount(
   const list = await gmailFetch<GmailListResponse>(listUrl, accessToken);
   const messageRefs = list.messages ?? [];
   if (messageRefs.length === 0) {
-    return { accountEmail, created: 0, skipped: 0 };
+    return { accountEmail, created: 0, skipped: 0, filtered: 0 };
   }
 
   const messages = await Promise.all(
     messageRefs.map((ref) =>
       gmailFetch<GmailMessage>(buildMessageUrl(ref.id), accessToken),
     ),
+  );
+
+  // Score each message in parallel. Promise.allSettled so one slow or
+  // erroring scoring call doesn't block the whole sync — failures default to
+  // score 5 inside scoreEmailImportance.
+  const scoreResults = await Promise.allSettled(
+    messages.map((msg) =>
+      scoreEmailImportance(
+        {
+          subject: headerValue(msg, "Subject") ?? "",
+          from: headerValue(msg, "From") ?? "",
+          snippet: decodeSnippet(msg.snippet),
+        },
+        { messageId: msg.id },
+      ),
+    ),
+  );
+
+  const scores: EmailScore[] = scoreResults.map((r) =>
+    r.status === "fulfilled"
+      ? r.value
+      : { score: 5, reason: "scoring-rejected" },
   );
 
   const { data: maxPos } = await supabase
@@ -113,21 +158,56 @@ async function syncOneAccount(
 
   const basePosition = (maxPos?.position ?? -1) + 1;
 
-  const rows = messages.map((msg, i) => {
-    const subject = headerValue(msg, "Subject") ?? "(no subject)";
+  const showFiltered = options.showFiltered === true;
+  const rows: Array<{
+    user_id: string;
+    title: string;
+    description: string;
+    status: TaskStatus;
+    source: "gmail";
+    source_account: string;
+    source_id: string;
+    position: number;
+    importance: number;
+  }> = [];
+  let filtered = 0;
+  let nextPosition = basePosition;
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const score = scores[i];
+    const isLowImportance = score.score < IMPORTANCE_THRESHOLD;
+
+    if (isLowImportance && !showFiltered) {
+      filtered += 1;
+      continue;
+    }
+
+    const rawSubject = headerValue(msg, "Subject") ?? "(no subject)";
     const from = headerValue(msg, "From") ?? "(unknown sender)";
     const snippet = decodeSnippet(msg.snippet);
-    return {
+    const title =
+      isLowImportance && showFiltered
+        ? `[filtered:${score.score}] ${rawSubject}`
+        : rawSubject;
+
+    rows.push({
       user_id: userId,
-      title: subject,
+      title,
       description: `From: ${from}\n\n${snippet}`,
       status: INTAKE_STATUS,
-      source: "gmail" as const,
+      source: "gmail",
       source_account: accountEmail,
       source_id: msg.id,
-      position: basePosition + i,
-    };
-  });
+      position: nextPosition,
+      importance: score.score,
+    });
+    nextPosition += 1;
+  }
+
+  if (rows.length === 0) {
+    return { accountEmail, created: 0, skipped: 0, filtered };
+  }
 
   const { data: inserted, error } = await supabase
     .from("tasks")
@@ -143,7 +223,7 @@ async function syncOneAccount(
 
   const created = inserted?.length ?? 0;
   const skipped = rows.length - created;
-  return { accountEmail, created, skipped };
+  return { accountEmail, created, skipped, filtered };
 }
 
 function buildMessageUrl(id: string): URL {

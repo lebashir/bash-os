@@ -34,10 +34,10 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 - Bash OS *replaces* ClickUp for Bashir's personal use. Don't build a connector for the tool we're moving off of.
 - This is not a "todo later" — it's a "never". If a future round prompt says "let's add ClickUp", stop and re-read this entry.
 
-## 6. Gmail intake is a firehose
+## 6. Gmail importance threshold is hard-coded — RESOLVED in R3a
 
-- Current sync brings every unread inbox message into `things to think about` with no triage. The intake column fills up with marketing emails, CC chains, and calendar invites.
-- This is the primary motivator for R3 (importance filtering). Workaround in the meantime: archive low-value emails before hitting Sync, or just live with the noise.
+- Resolved by R3a (2026-05-19). Gmail sync now scores each unread message via Gemini 3 Flash and drops anything below `IMPORTANCE_THRESHOLD = 4`. See `docs/ARCHITECTURE.md` → "Email importance scoring".
+- Tunable in code only — no UI knob yet. If the rubric over- or under-filters, edit the threshold in `src/lib/board/email-importance.ts` and/or the system prompt in the same file. `/board?show_filtered=1` re-runs sync without the filter for spot-checking.
 
 ## 7. No connector rate-limit handling
 

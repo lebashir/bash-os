@@ -5,12 +5,17 @@ import { BriefDrawer } from "@/components/board/BriefDrawer";
 import { ChatLauncher } from "@/components/board/ChatLauncher";
 import { FlashToaster } from "@/components/board/FlashToaster";
 import { SyncButton } from "@/components/board/SyncButton";
+import { syncGmailForUser } from "@/lib/board/gmail-sync";
 import { createClient } from "@/lib/supabase/server";
 import { listTasks } from "./actions";
 import { listConnectedAccounts } from "./connectors";
 
 type BoardPageProps = {
-  searchParams: Promise<{ connected?: string; error?: string }>;
+  searchParams: Promise<{
+    connected?: string;
+    error?: string;
+    show_filtered?: string;
+  }>;
 };
 
 export default async function BoardPage({ searchParams }: BoardPageProps) {
@@ -21,10 +26,26 @@ export default async function BoardPage({ searchParams }: BoardPageProps) {
 
   if (!user) redirect("/login");
 
-  const [tasks, accounts, flash] = await Promise.all([
+  const flash = await searchParams;
+
+  // Debug toggle: re-run Gmail sync without the importance filter so the
+  // dropped messages surface on the board with a [filtered:N] title prefix.
+  // Deliberate side-effect-on-render — single-user dev affordance, no need
+  // for a button or separate UI.
+  if (flash.show_filtered === "1") {
+    try {
+      await syncGmailForUser(supabase, user.id, { showFiltered: true });
+    } catch (err) {
+      console.warn(
+        "[board] show_filtered sync failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  const [tasks, accounts] = await Promise.all([
     listTasks(),
     listConnectedAccounts(),
-    searchParams,
   ]);
 
   return (

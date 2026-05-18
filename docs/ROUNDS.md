@@ -66,21 +66,26 @@ A small round between R2 and R3 to fix one wrong abstraction, add one missing pr
 
 ---
 
-## R3 — Email importance filtering + decomposition — 🔜 Planned, not started
+## R3 — Email importance filtering + decomposition — 🚧 In progress
 
-The R2 connectors are firehoses: Gmail dumps every unread inbox message into the board, Jira every open assignee issue. R3's job is to make the board signal, not noise.
+Split into two sub-rounds shipped back-to-back. R3a in flight on 2026-05-19; R3b queued behind it.
 
-**Email importance filtering**
-- *Why it matters:* Gmail's inbox is mostly low-signal. Right now every unread email becomes a task; the board fills with calendar invites, marketing, and CC chains. The intake column needs a triage step.
-- *Rough shape:* On Gmail sync, after the message metadata is fetched but before `upsert`, run a Gemini call that rates each message 0-10 for "is this something Bashir actually needs to act on" using a short rubric (sender relationship, action verbs in the body, calendar/deadline mentions, marketing markers). Drop anything below a threshold; tag the remaining tasks with the score in `description` or a new `importance` column. Add a "show all" toggle in the UI for the dropped ones.
+### R3a — Email importance filtering — ✅ Complete (2026-05-19)
 
-**Decomposition / "Break it down"**
+- New `tasks.importance smallint null` column (migration `20260519020000_r3a_tasks_importance.sql`). Unconstrained at the DB so the threshold + scale can be retuned in app code.
+- New helper `src/lib/board/email-importance.ts`: per-message Gemini 3 Flash call that returns `{ score: 1-10, reason: <short phrase> }`. Rubric weighs sender relationship, action verbs, calendar/deadline mentions, and marketing markers. Failures default to score 5 (admit) and a `console.warn` log; never silently drop on infrastructure error.
+- Gmail sync now scores each fetched message in parallel via `Promise.allSettled`. Score < 4 is dropped before the upsert; score >= 4 is upserted with `importance` set.
+- `?show_filtered=1` query param on `/board` re-runs the Gmail sync without dropping low-score messages. Filtered messages land with a `[filtered:N]` title prefix so they're visually distinguishable when spot-checking the rubric. Deliberately a debug affordance — no UI button.
+- Rubric verified on five canonical fixtures against the dev project: personal action request → 10, calendar invite (required) → 8, newsletter → 4, marketing promo → 1, CC chain → 4. No prompt iteration needed.
+- Cleared known issue #6 (Gmail firehose).
+
+### R3b — Task decomposition — 🔜 Planned
+
 - *Why it matters:* A Jira issue or a vague capture like "ship the new pricing flow" isn't actionable — it's a project. The board has a `Claude work` column and a `Boss Check` column precisely because some tasks should be split into sub-tasks across multiple actors. Right now there's no way to do that split.
-- *Rough shape:* A "Break down" button on a task opens an agent flow that proposes a tree: parent → 2-5 children. Each child gets a slashed source ID like `[PMP-65/research]`, `[PMP-65/draft]`, `[PMP-65/review]` so the relationship is visible in the title. Children are routed to `Bash work` / `Claude work` / `Boss Check` based on what kind of work they are. A `parent_id` column on `tasks` would make the tree queryable; alternatively encode the parent in `source_id` and skip the schema change.
+- *Rough shape:* A "Break it down" button on a task opens an agent flow that proposes a tree: parent → 2-5 children. Children are classified into `Bash work` / `Claude work` / `Boss Check` per the agent rubric. A `parent_id uuid` column on `tasks` (FK self-reference, ON DELETE CASCADE) makes the tree queryable; children get a slashed source ID like `{parent.source_id ?? parent.id}/{slug}` so the relationship is visible at a glance.
 
 **Possible R3 stretch items** (lift only one or two — don't blow scope):
 - Connector retry / backoff for transient 429s and 5xxs.
-- A `tasks.importance` numeric column to let the UI sort or filter intake.
 - Per-task "remind me" timers backed by Vercel Cron + a `due_date`-driven trigger.
 
 ---

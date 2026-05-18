@@ -69,6 +69,7 @@ Migrations (in apply order):
 | `20260518235838_r2_chat_messages.sql` | Chat persistence table for the assistant drawer. |
 | `20260519000100_r2_memory_search.sql` | HNSW cosine index on `memories.embedding` + `match_memories(query_embedding, match_count)` RPC. |
 | `20260519010000_r2_5_briefs_table.sql` | R2.5 — adds `public.briefs` with `unique (user_id, brief_date)`, deletes any existing brief-tasks, drops `'brief'` from the `tasks.source` CHECK. |
+| `20260519020000_r3a_tasks_importance.sql` | R3a — adds `tasks.importance smallint null` for the Gmail importance scorer. |
 
 ## Environment variables
 
@@ -95,7 +96,7 @@ See `.env.example` for the canonical list. Quick reference:
 - Token flow: `/connectors/google/connect` redirects to Google OAuth; `/connectors/google/callback` exchanges the code, stores `access_token` + `refresh_token` + `expires_at` + `scopes` in `connector_tokens` keyed on `(user_id, provider='google', account_email)`. One Bash OS user can connect multiple Google accounts (e.g. work + personal).
 - Scopes requested: `openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly`.
 - Refresh: lazy. On each connector call, `getGoogleAccessToken` reads the stored row; if it's within 60s of expiry, refreshes against `https://oauth2.googleapis.com/token` and persists the new access token + expiry. Failed refresh surfaces as "reconnect the account".
-- **Gmail sync:** queries `is:unread in:inbox`, pulls last 20 messages, lands them in `things to think about` with `source='gmail'`, `source_account=<email>`, `source_id=<gmail message id>`. Dedup via `(user_id, source, source_account, source_id)`.
+- **Gmail sync:** queries `is:unread in:inbox`, pulls last 20 messages, scores each via Gemini 3 Flash (`src/lib/board/email-importance.ts`), drops anything with `importance < 4`, and lands the survivors in `things to think about` with `source='gmail'`, `source_account=<email>`, `source_id=<gmail message id>`, and `importance` set on the row. Dedup via `(user_id, source, source_account, source_id)`. Scoring failures default to `score=5` (admit) so a model outage never silently swallows real mail. Append `?show_filtered=1` to `/board` to re-run sync without dropping low-score messages — admitted-but-low rows get a `[filtered:N]` title prefix for spot-checking the rubric.
 - **Calendar sync:** pulls the next 24h of events, lands them with `source='calendar'`. `due_date` is set to the event start time.
 
 ### Jira — PAT, single site
@@ -166,4 +167,4 @@ Vercel Server Actions and Route Handlers read env vars at runtime — adding or 
 
 ## Round status
 
-R1, R2, and R2.5 are complete. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R3+ plan.
+R1, R2, R2.5, and R3a are complete. R3b (task decomposition) is the active round. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R3+ plan.

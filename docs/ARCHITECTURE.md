@@ -255,6 +255,22 @@ Mutating tool calls surface as `tool-{name}` parts in the streamed response, the
 
 ---
 
+## Email importance scoring
+
+R3a wires a triage step into the Gmail sync. For each unread message, after metadata is fetched and before the `tasks` upsert, `scoreEmailImportance({ subject, from, snippet })` calls Gemini 3 Flash with a one-shot rubric and returns `{ score: 1-10, reason: string }`. Scores below 4 are dropped silently; scores >= 4 are upserted and persisted on the new `tasks.importance smallint null` column.
+
+Why the column is unconstrained: the threshold is intentionally an app-code knob, not a CHECK. Future rounds may want per-source rubrics (e.g. different cutoffs for Slack vs Gmail) or different scales — keeping the DB schema generic avoids a migration each time. Existing pre-R3a rows stay `importance NULL`, which the rest of the code reads as "unscored", not "low".
+
+Failure semantics: if the model errors, throws a schema mismatch, or the request times out, `scoreEmailImportance` returns `{ score: 5, reason: 'scoring-failed' }`. The message is admitted with a neutral score rather than dropped — a noisy false-positive is recoverable (Bashir archives it), but a silently-dropped real email is not. The failure is `console.warn`-logged with the Gmail message ID so it can be traced.
+
+Concurrency: scoring runs across all fetched messages via `Promise.allSettled`, so a single slow call doesn't block the rest of the sync. The Gmail API list cap is 20 messages per account per sync, so concurrent scoring loads are bounded.
+
+Threshold is `IMPORTANCE_THRESHOLD = 4` in `src/lib/board/email-importance.ts`. Anything `< 4` is dropped. Calendar invites the user is required for typically score 8; personal action requests score 9-10; newsletters and CC chains hover at 3-4; marketing scores 1-2 and is consistently filtered.
+
+`/board?show_filtered=1` is a spot-check toggle: re-runs the Gmail sync with the filter disabled and tags admitted-but-low-score rows with a `[filtered:N]` title prefix so Bashir can eyeball what the rubric dropped. Deliberately a query-param affordance, not a UI button — it's a debug tool.
+
+---
+
 ## The Tabby network TLS issue
 
 Local Supabase via Docker is **broken on the Tabby corporate network** and we don't develop against it. The story:
