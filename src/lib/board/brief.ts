@@ -8,6 +8,8 @@ Write one short brief (90 to 130 words) in plain prose — no bullet lists, no h
 Open with a one-sentence read on the day. Then call out the 2-3 most important things to focus on, naming specific tasks by their titles when possible. Close with a single nudge toward action.
 Avoid platitudes, never invent items that aren't in the context, and don't summarize the brief itself.`;
 
+const BRIEF_TIMEZONE = "Asia/Dubai";
+
 type BriefContext = {
   today: string;
   countsByStatus: Record<TaskStatus, number>;
@@ -21,8 +23,10 @@ export async function generateAndStoreBrief(
   supabase: SupabaseClient,
   userId: string,
   now: Date = new Date(),
-): Promise<{ taskId: string; preview: string }> {
-  const context = await assembleContext(supabase, userId, now);
+): Promise<{ briefId: string; briefDate: string; content: string }> {
+  const briefDate = dubaiDate(now);
+  const context = await assembleContext(supabase, userId, now, briefDate);
+
   const { text: briefText, finishReason } = await generateText({
     model: google(CHAT_MODEL_ID),
     system: BRIEF_SYSTEM_PROMPT,
@@ -39,48 +43,38 @@ export async function generateAndStoreBrief(
     );
   }
 
-  const briefTitle = `Daily brief — ${context.today}`;
-
-  // One brief per user per day. Manual re-runs of the cron (or two firings
-  // for any reason) should refresh, not stack.
-  const { error: deleteError } = await supabase
-    .from("tasks")
-    .delete()
-    .eq("user_id", userId)
-    .eq("source", "brief")
-    .eq("title", briefTitle);
-  if (deleteError) {
-    throw new Error(
-      `Failed to clear prior brief: ${deleteError.message}`,
-    );
-  }
-
-  const briefPosition = await leadingPosition(supabase, userId, "todays plate");
-
+  // Upsert on (user_id, brief_date). Re-running the cron same day overwrites
+  // the day's brief rather than stacking — the unique constraint enforces it
+  // at the DB level and the trigger bumps updated_at.
   const { data: inserted, error } = await supabase
-    .from("tasks")
-    .insert({
-      user_id: userId,
-      title: briefTitle,
-      description: briefText,
-      status: "todays plate" satisfies TaskStatus,
-      source: "brief",
-      priority: "high",
-      position: briefPosition,
-    })
-    .select("id")
+    .from("briefs")
+    .upsert(
+      {
+        user_id: userId,
+        brief_date: briefDate,
+        content: briefText,
+      },
+      { onConflict: "user_id,brief_date" },
+    )
+    .select("id, brief_date, content")
     .single();
 
   if (error) {
-    throw new Error(`Failed to insert brief task: ${error.message}`);
+    throw new Error(`Failed to upsert brief: ${error.message}`);
   }
-  return { taskId: inserted.id, preview: briefText };
+
+  return {
+    briefId: inserted.id as string,
+    briefDate: inserted.brief_date as string,
+    content: inserted.content as string,
+  };
 }
 
 async function assembleContext(
   supabase: SupabaseClient,
   userId: string,
   now: Date,
+  briefDate: string,
 ): Promise<BriefContext> {
   const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
   const horizon = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
@@ -141,7 +135,7 @@ async function assembleContext(
     .map(({ title }) => ({ title }));
 
   return {
-    today: formatDate(now),
+    today: briefDate,
     countsByStatus,
     recentGmailTasks: (recentGmail.data ?? []) as BriefContext["recentGmailTasks"],
     upcomingCalendarEvents: (upcomingEvents.data ??
@@ -210,25 +204,18 @@ function renderContext(ctx: BriefContext): string {
   return lines.join("\n");
 }
 
-async function leadingPosition(
-  supabase: SupabaseClient,
-  userId: string,
-  status: TaskStatus,
-): Promise<number> {
-  const { data, error } = await supabase
-    .from("tasks")
-    .select("position")
-    .eq("user_id", userId)
-    .eq("status", status)
-    .order("position", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (error) {
-    throw new Error(`Brief: failed to read min position: ${error.message}`);
-  }
-  return (data?.position ?? 0) - 1;
-}
-
-function formatDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+// Convert a Date to a YYYY-MM-DD string in Dubai's local calendar. Dubai is a
+// fixed UTC+4 (no DST), so a brief generated at 05:30 UTC always lands on the
+// correct Dubai morning even if a re-run happens later in the same UTC day.
+function dubaiDate(d: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BRIEF_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const year = parts.find((p) => p.type === "year")?.value ?? "0000";
+  const month = parts.find((p) => p.type === "month")?.value ?? "01";
+  const day = parts.find((p) => p.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
 }

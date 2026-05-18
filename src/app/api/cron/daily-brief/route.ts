@@ -14,7 +14,8 @@ type UserBriefSummary = {
   calendarCreated: number;
   calendarSkipped: number;
   syncErrors: string[];
-  briefTaskId?: string;
+  briefId?: string;
+  briefDate?: string;
   briefError?: string;
 };
 
@@ -84,8 +85,9 @@ export async function GET(request: NextRequest) {
     }
 
     try {
-      const { taskId } = await generateAndStoreBrief(admin, userId);
-      summary.briefTaskId = taskId;
+      const { briefId, briefDate } = await generateAndStoreBrief(admin, userId);
+      summary.briefId = briefId;
+      summary.briefDate = briefDate;
     } catch (error) {
       summary.briefError =
         error instanceof Error ? error.message : "Unknown brief error";
@@ -95,7 +97,8 @@ export async function GET(request: NextRequest) {
   }
 
   // Invalidate the cached /board render so a user opening the page in the
-  // morning sees the freshly-synced items + brief without a hard refresh.
+  // morning sees the freshly-synced items + the newest brief in the drawer
+  // without a hard refresh.
   revalidatePath("/board");
 
   return NextResponse.json({
