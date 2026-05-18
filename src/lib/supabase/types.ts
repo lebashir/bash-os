@@ -15,6 +15,7 @@ export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
 export const TASK_SOURCES = [
   "manual",
+  "brief",
   "gmail",
   "calendar",
   "slack",
