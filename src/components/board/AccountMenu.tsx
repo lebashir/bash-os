@@ -67,19 +67,24 @@ export function AccountMenu({ userEmail, accounts }: AccountMenuProps) {
         <ChevronDown className="size-3.5" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-72">
-        <DropdownMenuLabel>Signed in</DropdownMenuLabel>
-        <DropdownMenuItem disabled className="opacity-100 data-disabled:opacity-100">
-          <span className="truncate">{userEmail}</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>Connected Google accounts</DropdownMenuLabel>
-        {accounts.length === 0 ? (
-          <DropdownMenuItem disabled>
-            <span className="text-muted-foreground">None yet</span>
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Signed in</DropdownMenuLabel>
+          <DropdownMenuItem
+            disabled
+            className="opacity-100 data-disabled:opacity-100"
+          >
+            <span className="truncate">{userEmail}</span>
           </DropdownMenuItem>
-        ) : (
-          <DropdownMenuGroup>
-            {accounts.map((account) => (
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Connected Google accounts</DropdownMenuLabel>
+          {accounts.length === 0 ? (
+            <DropdownMenuItem disabled>
+              <span className="text-muted-foreground">None yet</span>
+            </DropdownMenuItem>
+          ) : (
+            accounts.map((account) => (
               <DropdownMenuItem
                 key={`${account.provider}:${account.accountEmail}`}
                 onClick={(event) => {
@@ -91,9 +96,9 @@ export function AccountMenu({ userEmail, accounts }: AccountMenuProps) {
                 <span className="truncate">{account.accountEmail}</span>
                 <Trash2 className="ml-2 size-3.5 text-muted-foreground" />
               </DropdownMenuItem>
-            ))}
-          </DropdownMenuGroup>
-        )}
+            ))
+          )}
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem render={<a href="/connectors/google/connect" />}>
           <Plus />
