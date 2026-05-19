@@ -402,6 +402,137 @@ The agent returns `{ children: [{ title, description, kind, rationale }] }` via 
 
 ---
 
+## Autonomous agent loop architecture (planned — not yet implemented)
+
+> **Status: planned, not built.** R3.5 shipped the surface (`owner` field,
+> agent activity feed, Review column with `needs_review`). The execution
+> loop is staged across R4-R8 (see `docs/ROUNDS.md`). Nothing in this
+> section runs today. The five considerations below exist now because
+> R4 has to bake them in from day one — retrofitting trust + budgets
+> after R6 (autonomous task creation) lands is much harder than
+> designing them into R4's daemon.
+
+The "autonomous loop" is the long-term shape Bash OS is converging on:
+a local Claude Code daemon on Bashir's laptop polls the production
+API, executes Claude-owned tasks, surfaces output for human checkpoint
+on the irreversible parts, and runs continuously alongside Bashir's
+own work. **The five design considerations below apply across R4-R8 —
+bake them in from R4 onward.**
+
+### 1. Trust boundary as a first-class concept
+
+Each task carries a **`requires_review`** flag at the schema level,
+separate from the runtime **`needs_review`** flag. They mean different
+things:
+
+- `requires_review=true` (capability): "this task type can never
+  ship without Bashir's approval." Set at creation, immutable for
+  the life of the task. Lives on the row.
+- `needs_review=true` (state): "this task is currently in Review and
+  waiting for Bashir to approve or reject." Toggles as the task
+  flows through the board.
+
+**Irreversible actions ALWAYS get `requires_review=true`:** send
+email, push git, purchase, post to Slack, delete files, modify
+external services. The daemon never executes a `requires_review`
+action without routing the output to Review first.
+
+Trust rules live in **`claude_policy.yaml`** (per-user or per-project).
+The daemon reads it on startup and on file change. A stub
+`claude_policy.example.yaml` lands in the daemon repo when R4 starts.
+Bashir maintains the real policy locally — it's not in source
+control.
+
+R4 migration: add `tasks.requires_review bool default false`.
+
+### 2. Cost budgets that can't be exceeded
+
+The daemon enforces per-day **token** and **dollar** budgets from
+`claude_policy.yaml`. Hitting either is a circuit-breaker:
+
+- In-flight tasks finish.
+- No new task starts.
+- The daemon writes an `agent_events` row `action='budget pause'`.
+- The brief panel surfaces a new attention bar trigger: "Budget hit:
+  paused until tomorrow 00:00 Dubai."
+- Bashir can manually clear by editing the policy file or waiting
+  for the daily reset.
+
+**Prerequisite for R6 (autonomous task creation):** the AI Gateway
+swap (`docs/KNOWN_ISSUES.md` #2). Gateway gives per-model cost
+dashboards that the daemon polls for actuals; without it the daemon
+can only estimate from token counts (good enough for R4 where every
+task is human-initiated, not for R6 where Claude can spawn its own
+work).
+
+### 3. Decision auditability
+
+Whenever Claude makes an autonomous decision — take a task, add a
+follow-up, decompose, choose between alternatives — capture **why**
+in a structured column on the resulting row.
+
+R5 migration: add `tasks.decision_reason text null`. Example values:
+
+- "Took because: matches 'research' policy rule" (R5 self-selection)
+- "Added follow-up because: parent execution surfaced unclear vendor
+  pricing" (R6 autonomous creation)
+- "Decomposed mid-execution because: original task scope expanded
+  during research" (R7 autonomous decomposition)
+
+Lets Bashir audit a chain of 10 Claude-added tasks and reconstruct
+the reasoning without re-reading transcripts. R4 doesn't produce
+decisions yet (the daemon just picks tasks Bashir marked) but log
+the "I picked task X" event via `agent_events` from day one so the
+audit trail exists.
+
+### 4. Stop conditions
+
+Configurable knobs in `claude_policy.yaml`, NOT hard-coded constants:
+
+- **Max decomposition depth** (e.g., 3 levels). Prevents an
+  R7 task from decomposing → decomposing children → decomposing
+  grandchildren ad infinitum.
+- **Max follow-up tasks per parent** (e.g., 5). Prevents an R6 task
+  from spawning a 50-task subtree from a single execution.
+- **Per-task token budget.** Individual runaway tasks get killed.
+- **Per-day total token budget.** See #2.
+- **Mandatory pause when Review queue exceeds threshold N.** See #5.
+
+All knobs read at daemon startup and on policy file change. No
+restart required.
+
+### 5. Review queue backpressure
+
+If `count(tasks WHERE needs_review=true) > threshold`, the daemon
+pauses new task starts. The brief panel surfaces this as a NEW
+attention bar trigger:
+
+```
+"Review backlog: N items — Claude paused."
+```
+
+Treatment: amber. Click: filter board to the Review column.
+
+The threshold is in `claude_policy.yaml` (default suggestion: 5 — if
+Bashir has more than 5 Claude-completed tasks waiting for him to
+approve, no new ones should pile up).
+
+**Why this matters.** Without backpressure, Bashir wakes up to "47
+things to approve" and the queue is unactionable. The daemon's
+willingness to keep producing output gets capped by Bashir's actual
+review throughput. Builds in a natural ergonomic limit: Claude works
+as fast as Bashir can review.
+
+---
+
+R4 implements only the daemon execution loop. Self-selection,
+autonomous task creation, autonomous decomposition, and full
+continuous operation come in R5-R8 (see `docs/ROUNDS.md`). The five
+design considerations above apply across all those rounds — bake them
+in from R4 onward.
+
+---
+
 ## The Tabby network TLS issue
 
 Local Supabase via Docker is **broken on the Tabby corporate network** and we don't develop against it. The story:
