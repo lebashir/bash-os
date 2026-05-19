@@ -214,9 +214,9 @@ Migration was three commits: `2090e1b` refactor, `fc07d04` more chat tools (the 
 4. Build `messages: ModelMessage[]` via `buildAgentMessages(supabase, userId, userText)` — that helper loads the last 20 chat_messages rows, runs `searchMemories` for the current question, queries board + calendar + gmail context, and prepends a single user/assistant pair containing the rendered context.
 5. `agent.stream({ messages })` → `result.toUIMessageStreamResponse({ onFinish })`.
 6. `result.consumeStream()` is called (no await) so the model output drains even if the client disconnects — onFinish still fires and the assistant message still hits the DB.
-7. `onFinish` extracts the assistant text from `responseMessage.parts`, INSERTs into `chat_messages`, then `revalidatePath('/board')`.
+7. `onFinish` extracts the assistant text from `responseMessage.parts`, INSERTs into `chat_messages`, then `revalidatePath('/')`.
 
-The client (`ChatLauncher.tsx`) hydrates from `listChatUIMessages()` on drawer open via `setMessages(initial)`. Tool actions surface as `tool-{name}` parts in the streamed response; the client scans them in `onFinish` and toasts per tool, then `router.refresh()` if any tool succeeded.
+The client (`src/components/home/CommandBar.tsx`) hydrates from `listChatUIMessages()` on page load via the homepage server component, threading the result through `initialMessages` into `useChat({ messages: initialMessages, transport: new DefaultChatTransport(...) })`. The popover above the bar renders the last 8 turns; tool actions surface as `tool-{name}` parts in the streamed response. (R3.5 deleted the drawer-based `ChatLauncher.tsx` and the per-message "Remember" affordance along with it — see KNOWN_ISSUES.)
 
 ---
 
@@ -295,7 +295,7 @@ The unique constraint enforces one-per-day at the DB. The cron now `upsert`s on 
 
 **Data loss on migration.** The R2.5 migration `delete from public.tasks where source = 'brief'` permanently removed the one existing brief-task. There was no path to migrate it into `public.briefs` without parsing its title for the date, and no historical brief data worth preserving (R2 had only shipped the day before). The next cron firing populates the new table cleanly.
 
-UI surface: `BriefDrawer` (`src/components/board/BriefDrawer.tsx`) is a right-side drawer mirroring the chat drawer pattern. A `FileText` icon in the board header opens it; the body renders the selected day's content with `whitespace-pre-wrap` (briefs are plain prose by design, no markdown lib needed); a 7-day history list at the bottom swaps which day is shown. Server action `listRecentBriefs()` in `src/app/board/brief-actions.ts` is the only read path — `LIMIT 7` is fine for the foreseeable future.
+**R3.5 retirement.** The R2.5 `BriefDrawer` was deleted in R3.5 — its slot is now the deterministic Brief panel on the homepage (see "Brief panel architecture" above). The `listRecentBriefs()` server action in `src/app/board/brief-actions.ts` survives but has no caller. The `public.briefs` table is orphaned: no writer (cron stopped writing in R3.5), no reader (panel reads live state). Flagged in KNOWN_ISSUES as a deprecated-table cleanup candidate; not dropped because a future hybrid mode (LLM-generated headline) could reuse it.
 
 ---
 
@@ -330,25 +330,27 @@ The service-role keys are different per project. `SUPABASE_SERVICE_ROLE_KEY` in 
 
 ## Chat agent tool taxonomy
 
-The `ToolLoopAgent` in `src/lib/board/chat.ts` exposes six tools, split by side-effects:
+The `ToolLoopAgent` in `src/lib/board/chat.ts` exposes six tools, split by side-effects. R3.5 swapped every `status` argument for column **names** which the executor resolves to a `column_id` server-side via `resolveColumnByName`; `createTask` also accepts an optional `owner` ('bash' default, 'claude' when the user delegates).
 
-**Four mutating tools** (R2):
+**Four mutating tools** (R2 — R3.5 swapped status → column):
 
 | Tool | Verb |
 |---|---|
-| `createTask` | Insert a new task into a column. |
-| `moveTask` | Resolve by title fragment, move to a different column. |
-| `updateTask` | Resolve by title fragment, patch title/description/priority/status. |
+| `createTask` | Insert a new task into a column (by name). Default `Inbox`. Accepts `owner`. |
+| `moveTask` | Resolve by title fragment, move to a different column (by name). |
+| `updateTask` | Resolve by title fragment, patch title/description/priority/column. |
 | `deleteTask` | Resolve by title fragment, permanent delete. |
 
-**Two read-only tools** (R2.5):
+All four also insert a `public.task_events` row so the timeline panel reflects the activity.
+
+**Two read-only tools** (R2.5 — R3.5 swapped status → column):
 
 | Tool | Verb |
 |---|---|
-| `findTasks` | Keyword + status/source filtered query across the full board (limit 1-25, default 10). |
+| `findTasks` | Keyword + column/source filtered query across the full board (limit 1-25, default 10). |
 | `findMemories` | Semantic search over `public.memories` with the same cosine-0.55 threshold as the per-turn auto-injection. |
 
-**When to reach for read tools vs the injected context.** Every chat turn ships a snapshot of the board (truncated to 12 tasks per column), the next 24h of calendar, the last 48h of email, and the top-5 memory matches for the user's question. That snapshot is fine for "what should I do today?" type questions. The read tools exist for the cases the snapshot doesn't cover:
+**When to reach for read tools vs the injected context.** Every chat turn ships a snapshot of the board (truncated to 12 tasks per column, grouped by the user's current column set), the next 24h of calendar, the last 48h of email, and the top-5 memory matches for the user's question. That snapshot is fine for "what should I do today?" type questions. The read tools exist for the cases the snapshot doesn't cover:
 
 - A column has more than 12 tasks and the user asks about something in the tail.
 - The user references a keyword that might match across columns — `findTasks` with a `query` filter is more reliable than scanning the snapshot.
@@ -362,7 +364,7 @@ Mutating tool calls surface as `tool-{name}` parts in the streamed response, the
 
 ## Email importance scoring
 
-R3a wires a triage step into the Gmail sync. For each unread message, after metadata is fetched and before the `tasks` upsert, `scoreEmailImportance({ subject, from, snippet })` calls Gemini 3 Flash with a one-shot rubric and returns `{ score: 1-10, reason: string }`. Scores below 4 are dropped silently; scores >= 4 are upserted and persisted on the new `tasks.importance smallint null` column.
+R3a wires a triage step into the Gmail sync. For each unread message, after metadata is fetched and before the `tasks` upsert, `scoreEmailImportance({ subject, from, snippet })` calls Gemini 3 Flash with a one-shot rubric and returns `{ score: 1-10, reason: string }`. Scores below 4 are dropped silently. The R3a behavior of "admit everything >=4 as a task" was refined in R3.5 — see "Email triage flow" above for the current 3-tier route (8-10 auto-task / 4-7 triage queue / <4 drop). The `tasks.importance smallint null` column is set on auto-tasked rows.
 
 Why the column is unconstrained: the threshold is intentionally an app-code knob, not a CHECK. Future rounds may want per-source rubrics (e.g. different cutoffs for Slack vs Gmail) or different scales — keeping the DB schema generic avoids a migration each time. Existing pre-R3a rows stay `importance NULL`, which the rest of the code reads as "unscored", not "low".
 
@@ -384,12 +386,13 @@ R3b adds a "Break it down" affordance on each task: an icon button on the card o
 
 **No nested decomposition.** R3b is two levels deep — a child can't itself be decomposed. The UI enforces this by hiding the Break-it-down button when `parent_id` is set; the schema doesn't. Lifting this would mean handling tree depth in the agent prompt (to avoid recursive sub-task explosions) and the UI (parent-of-parent chains). Not worth the complexity for the single-user case.
 
-**Classification rubric.** The decomposition agent routes each child into one of:
-- `Bash work` — relationships, judgment calls, irreversible actions. Meetings, decisions, external communications, anything requiring Bashir's personal context or authority.
-- `Claude work` — mechanical, low-judgment, reversible. Research, drafting, formatting, cross-referencing. The kind of unattended LLM work that produces a useful output.
-- `Boss Check` — Claude drafts something, Bashir approves before it ships. Procedure responses, status updates, draft replies, code that needs review before deploy.
+**Classification rubric.** The decomposition agent routes each child into one of three semantic *kinds*, which R3.5's `createDecomposedChildren` maps to (column_id, owner, needs_review) tuples at insert time:
 
-The agent returns `{ children: [{ title, description, status, rationale }] }` via `generateObject` with a Zod schema. `rationale` is shown in the dialog but not persisted — it's there to make the agent's reasoning legible during review.
+- `Bash work` — relationships, judgment calls, irreversible actions. Meetings, decisions, external communications, anything requiring Bashir's personal context or authority. → `(Active, bash, false)`.
+- `Claude work` — mechanical, low-judgment, reversible. Research, drafting, formatting, cross-referencing. The kind of unattended LLM work that produces a useful output. → `(Active, claude, false)`.
+- `Boss Check` — Claude drafts something, Bashir approves before it ships. Procedure responses, status updates, draft replies, code that needs review before deploy. → `(Review, claude, true)`.
+
+The agent returns `{ children: [{ title, description, kind, rationale }] }` via `generateObject` with a Zod schema. `rationale` is shown in the dialog but not persisted — it's there to make the agent's reasoning legible during review.
 
 **Show, don't auto-insert.** `decomposeTask(taskId)` only proposes; it does not write. The user reviews children in the `DecomposeDialog`, edits inline (title, description, column), can deselect any, and clicks "Create N sub-tasks". `createDecomposedChildren(parentId, children[])` is the write path. This is the same pattern as the chat agent's mutating tools — propose then confirm, no surprise writes.
 
