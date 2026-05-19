@@ -8,14 +8,15 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 
 - **Where:** `src/lib/gemini/client.ts` → `CHAT_MODEL_ID`
 - **Why:** Vercel AI Gateway exposes plain `google/gemini-3-flash` (non-preview), but the direct Google Generative Language API only ships the preview alias at our current access tier. We're on the direct API right now.
-- **Status:** verified working on production via the cron endpoint (`6375b6f`, daily-brief route returned the brief with no error on 2026-05-19). Chat UI flow not yet visually verified by Bashir. (R2.5 renamed the response field from `briefTaskId` to `briefId` when briefs moved to their own table.)
-- **Fix path:** when AI Gateway is wired up, change the model string to `'google/gemini-3-flash'` (no SDK change beyond that).
+- **Status:** verified working on production. Initial verification went through the cron endpoint (`6375b6f`, daily-brief route returned the brief with no error on 2026-05-19). As of 2026-05-19 the chat path is also verified live through the R3.5 command bar — Bashir exercised it at user level on `bash-os.vercel.app` after the R3.5 deploy.
+- **Fix path:** when AI Gateway is wired up (see #2), change the model string to `'google/gemini-3-flash'` (no SDK change beyond that).
 
-## 2. AI Gateway swap deferred
+## 2. AI Gateway swap — do before R6
 
 - One-line model-string change in `src/lib/gemini/client.ts` would route through Vercel AI Gateway. Unlocks observability, multi-provider routing, and the non-preview Gemini 3 Flash ID.
 - Bashir explicitly deferred this on 2026-05-19 ("too late for that tonight"). Picking it back up requires creating `AI_GATEWAY_API_KEY` in the Vercel dashboard.
-- Per-token cost is identical — Gateway BYOK uses your existing Google key, no markup. Not a cost question, just a "haven't done it yet" question.
+- Per-token cost is identical — Gateway BYOK uses your existing Google key, no markup. Not a cost question.
+- **Bumped from "deferred" to "do before R6":** R4-R8 introduce autonomous task execution by a local Claude Code daemon. Cost-budget enforcement (one of the design considerations in `docs/ARCHITECTURE.md` → "Autonomous agent loop architecture (planned)") needs per-model cost dashboards, which the Gateway provides. R6 is when autonomous task *creation* lands — that's the latest the Gateway should be in place.
 
 ## 3. OAuth refresh tokens are stored in plaintext columns
 
@@ -64,3 +65,16 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 
 - Both listed in the original R3.5 spec; trimmed to ship R3.5 cleanly. Board renders all tasks unfiltered, in `position` order within each column. Right-panel context section shows a placeholder where the chat-history affordance was supposed to land.
 - Pick up in R3.5c alongside recurring tasks.
+
+## 12. "Remember" affordance dropped in R3.5 — regression
+
+- The R2 chat drawer had a "Remember" button on each user message that called `commitToMemory(content, ['from-chat'])` (`src/app/board/memories.ts`). R3.5 deleted the drawer (`ChatLauncher.tsx`) and the command bar popover that replaced it never re-added the button.
+- `commitToMemory` itself is intact — only the UI hook is missing. New memories can't be written from the UI today.
+- Per-turn semantic retrieval (read path) is unaffected; it runs every chat turn regardless.
+- **Pick up alongside R3.5c chat-history pane** (#11). Same surface: the right-panel context section is the natural home for both "show chat history" and "remember this message".
+
+## 13. `public.briefs` is an orphaned table — deprecated-table cleanup candidate
+
+- R2.5 created `public.briefs` to hold LLM-generated daily briefs (one row per user per day). R3.5 made the brief panel deterministic (reads live state every render) and stopped writing to the table from the morning cron.
+- Today: no writer, no reader. The `listRecentBriefs()` action in `src/app/board/brief-actions.ts` is also orphaned (no caller).
+- **Don't drop it.** ARCHITECTURE.md ("Briefs vs tasks" + "Brief panel architecture") notes the table is preserved for a possible future hybrid mode (LLM-generated headline overlaid on the deterministic panel). If that mode never lands, drop the table + the orphan action in a future cleanup migration.
