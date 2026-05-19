@@ -4,7 +4,9 @@ import { FlashToaster } from "@/components/board/FlashToaster";
 import { BriefPanel } from "@/components/home/BriefPanel";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeShell } from "@/components/home/HomeShell";
+import { TimelinePanel } from "@/components/home/TimelinePanel";
 import { getBriefState } from "@/app/board/brief-state";
+import { getTimelineEvents } from "@/app/board/timeline";
 import { listConnectedAccounts } from "@/app/board/connectors";
 import { computeConnectorPills } from "@/lib/board/connector-status";
 import { createClient } from "@/lib/supabase/server";
@@ -40,9 +42,10 @@ export default async function Home({ searchParams }: HomeProps) {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [accounts, briefState, flash] = await Promise.all([
+  const [accounts, briefState, timelineEvents, flash] = await Promise.all([
     listConnectedAccounts(),
     getBriefState(),
+    getTimelineEvents(),
     searchParams,
   ]);
   const pills = computeConnectorPills(accounts);
@@ -58,12 +61,7 @@ export default async function Home({ searchParams }: HomeProps) {
         />
       }
       brief={<BriefPanel state={briefState} />}
-      timeline={
-        <>
-          <PanelTitle>today</PanelTitle>
-          <PanelPlaceholder note="vertical time-axis timeline lands in phase 4 — calendar events and task events will appear here." />
-        </>
-      }
+      timeline={<TimelinePanel events={timelineEvents} />}
       board={
         <>
           <div className="h-9 px-3 border-b border-[var(--bash-border-subtle)] flex items-center text-[11px] text-[var(--bash-text-muted)] bg-[var(--bash-panel)]">
