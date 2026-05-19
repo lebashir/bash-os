@@ -243,7 +243,3 @@ function slugify(title: string): string {
   const slug = words.join("-").slice(0, 30);
   return slug || "child";
 }
-
-export function maxChildren(): number {
-  return MAX_CHILDREN;
-}
