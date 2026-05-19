@@ -10,10 +10,10 @@ A personal life-OS for one person (Bashir). A three-panel homepage at `/` is the
 - **Tailwind 4** — utility-first styling.
 - **shadcn/ui** — components on Radix primitives; toasts via `sonner`.
 - **@dnd-kit** — drag-and-drop on the board (`core` + `sortable` + `utilities`).
-- **AI SDK v6** (`ai` + `@ai-sdk/google` + `@ai-sdk/react`) — chat agent, streaming, embeddings, daily brief generation.
-- **Gemini** — `gemini-3-flash-preview` for chat + daily brief; `gemini-embedding-001` (1536 dims) for memories.
+- **AI SDK v6** (`ai` + `@ai-sdk/google` + `@ai-sdk/react`) — chat agent, streaming, embeddings, task decomposition, email importance scoring.
+- **Gemini** — `gemini-3-flash-preview` for chat + decomposition + email scoring; `gemini-embedding-001` (1536 dims) for memories.
 - **Supabase** — Postgres + pgvector + Auth + RLS. Cloud project ref `vbooingflkmzxcqnbvxr`.
-- **Vercel** — hosting at `bash-os.vercel.app`; Vercel Cron for the daily brief.
+- **Vercel** — hosting at `bash-os.vercel.app`; Vercel Cron for morning sync and nightly unsnooze.
 - **pnpm** — package manager.
 
 ## Architecture overview
@@ -112,18 +112,18 @@ See `.env.example` for the canonical list. Quick reference:
 - Token flow: `/connectors/google/connect` redirects to Google OAuth; `/connectors/google/callback` exchanges the code, stores `access_token` + `refresh_token` + `expires_at` + `scopes` in `connector_tokens` keyed on `(user_id, provider='google', account_email)`. One Bash OS user can connect multiple Google accounts (e.g. work + personal).
 - Scopes requested: `openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly`.
 - Refresh: lazy. On each connector call, `getGoogleAccessToken` reads the stored row; if it's within 60s of expiry, refreshes against `https://oauth2.googleapis.com/token` and persists the new access token + expiry. Failed refresh surfaces as "reconnect the account".
-- **Gmail sync:** queries `is:unread in:inbox`, pulls last 20 messages, scores each via Gemini 3 Flash (`src/lib/board/email-importance.ts`), drops anything with `importance < 4`, and lands the survivors in `things to think about` with `source='gmail'`, `source_account=<email>`, `source_id=<gmail message id>`, and `importance` set on the row. Dedup via `(user_id, source, source_account, source_id)`. Scoring failures default to `score=5` (admit) so a model outage never silently swallows real mail. Append `?show_filtered=1` to `/board` to re-run sync without dropping low-score messages — admitted-but-low rows get a `[filtered:N]` title prefix for spot-checking the rubric.
-- **Calendar sync:** pulls the next 24h of events, lands them with `source='calendar'`. `due_date` is set to the event start time.
+- **Gmail sync:** queries `is:unread in:inbox`, pulls last 20 messages, scores each via Gemini 3 Flash (`src/lib/board/email-importance.ts`). R3.5 split the admit band three ways: score 8-10 auto-tasks to the **Inbox** column; score 4-7 lands in `public.pending_emails` for triage (brief panel attention bar + `TriageModal`); score <4 drops. All auto-tasked rows carry `source='gmail'`, `source_account=<email>`, `source_id=<gmail message id>`, and `importance`. Dedup via `(user_id, source, source_account, source_id)`. Scoring failures default to `score=5` (admit) so a model outage never silently swallows real mail. Append `?show_filtered=1` to `/` to re-run sync without dropping low-score messages — admitted-but-low rows get a `[filtered:N]` title prefix.
+- **Calendar sync:** pulls the next 24h of events, lands them in the **Today** column with `source='calendar'`. `due_date` is set to the event start time.
 
 ### Jira — PAT, single site
 
 - No OAuth dance. Token read from `JIRA_API_TOKEN` env, paired with `JIRA_EMAIL` for HTTP Basic auth against `JIRA_BASE_URL`.
 - JQL: `assignee = currentUser() AND statusCategory != Done`. Hits `POST /rest/api/3/search/jql` (the new endpoint after Atlassian deprecated `GET /search`).
-- Lands issues in **Bash work** (assigned issues are already actionable) with `source='jira'`, `source_account=<host>`, `source_id=<ISSUE-KEY>`. Maps Jira priority Highest/High/Medium/Low/Lowest → bash-os `urgent`/`high`/`normal`/`low`. Sets `due_date` from `fields.duedate` if present.
+- Lands issues in the **Active** column (assigned issues are already actionable) with `owner='bash'`, `source='jira'`, `source_account=<host>`, `source_id=<ISSUE-KEY>`. Maps Jira priority Highest/High/Medium/Low/Lowest → bash-os `urgent`/`high`/`normal`/`low`. Sets `due_date` from `fields.duedate` if present.
 
 ### Slack — code shipped, blocked at install time
 
-- Code lives at `src/lib/board/slack-sync.ts`. Reads `SLACK_USER_TOKEN` (a `xoxp-…` user token), calls `auth.test` to discover workspace + self ID, lists DM channels via `conversations.list?types=im`, pulls last 48h from each via `conversations.history`, drops the OTHER party's messages into `things to think about` deduped by `(channel:ts)`.
+- Code lives at `src/lib/board/slack-sync.ts`. Reads `SLACK_USER_TOKEN` (a `xoxp-…` user token), calls `auth.test` to discover workspace + self ID, lists DM channels via `conversations.list?types=im`, pulls last 48h from each via `conversations.history`, drops the OTHER party's messages into the **Inbox** column deduped by `(channel:ts)`.
 - Bashir is not a workspace admin at Tabby and Slack killed legacy user tokens in 2020, so the token can't currently be obtained. The connector silently no-ops when `SLACK_USER_TOKEN` is unset, so the rest of the app is unaffected.
 
 ## Command bar + chat tools
@@ -204,7 +204,7 @@ See `docs/ARCHITECTURE.md` → "Task decomposition" for the schema, classificati
 
 ## Memories + RAG
 
-- **Write side ("Remember" button):** each user chat bubble has a button that calls `commitToMemory(content, ['from-chat'])` (`src/app/board/memories.ts`). The content is embedded via `gemini-embedding-001` at 1536 dims with `taskType='RETRIEVAL_DOCUMENT'`, and inserted into `public.memories` (one row per memory, `embedding vector(1536)`, free-form `tags text[]`).
+- **Write side:** `commitToMemory(content, tags)` in `src/app/board/memories.ts` embeds the content via `gemini-embedding-001` at 1536 dims with `taskType='RETRIEVAL_DOCUMENT'` and inserts into `public.memories` (one row per memory, `embedding vector(1536)`, free-form `tags text[]`). **The UI hook is currently missing** — R3.5 deleted the chat drawer that held the per-message "Remember" button and the command bar popover hasn't re-added it. The server action still works if invoked; flagged in KNOWN_ISSUES.
 - **Read side (per chat turn):** every `/api/chat` POST embeds the user's incoming message with `taskType='RETRIEVAL_QUERY'`, calls the `match_memories(query_embedding, match_count)` RPC (SECURITY INVOKER — RLS-gated automatically), filters matches under cosine 0.55, and injects the top-K above the board state in the LLM context with the system-prompt instruction "treat as ground truth".
 - HNSW `vector_cosine_ops` index on `memories.embedding` keeps the search fast as the table grows.
 
