@@ -54,7 +54,7 @@ export async function POST(req: Request): Promise<Response> {
       const text = extractText(responseMessage);
       if (!text) return;
       await saveChatMessage(supabase, user.id, "assistant", text);
-      revalidatePath("/board");
+      revalidatePath("/");
     },
   });
 }

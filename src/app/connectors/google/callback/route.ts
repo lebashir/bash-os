@@ -90,7 +90,7 @@ function redirectToBoard(
   request: NextRequest,
   params: Record<string, string>,
 ): NextResponse {
-  const target = new URL("/board", request.url);
+  const target = new URL("/", request.url);
   for (const [key, value] of Object.entries(params)) {
     target.searchParams.set(key, value);
   }

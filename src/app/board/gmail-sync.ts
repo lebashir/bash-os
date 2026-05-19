@@ -23,7 +23,7 @@ export async function syncGmail(
 
   const result = await syncGmailForUser(supabase, user.id, options);
   if (result.totalCreated > 0) {
-    revalidatePath("/board");
+    revalidatePath("/");
   }
   return result;
 }

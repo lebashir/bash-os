@@ -33,7 +33,12 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isProtected = PROTECTED_PREFIXES.some((p) => pathname.startsWith(p));
+  // R3.5: "/" is the new home and must be auth-gated alongside /board.
+  // The "/" check is exact so it doesn't catch every nested route (each
+  // protected route lists its own prefix here).
+  const isProtected =
+    pathname === "/" ||
+    PROTECTED_PREFIXES.some((p) => pathname.startsWith(p));
   const isPublic = PUBLIC_PREFIXES.some((p) => pathname.startsWith(p));
 
   if (!user && isProtected) {
@@ -44,7 +49,7 @@ export async function updateSession(request: NextRequest) {
 
   if (user && isPublic && pathname.startsWith("/login")) {
     const url = request.nextUrl.clone();
-    url.pathname = "/board";
+    url.pathname = "/";
     return NextResponse.redirect(url);
   }
 

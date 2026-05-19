@@ -90,7 +90,7 @@ export async function createTask(input: TaskFormInput): Promise<Task> {
   if (error) {
     throw new Error(`Create failed: ${error.message}`);
   }
-  revalidatePath("/board");
+  revalidatePath("/");
   return data as Task;
 }
 
@@ -111,7 +111,7 @@ export async function updateTask(
   if (error) {
     throw new Error(`Update failed: ${error.message}`);
   }
-  revalidatePath("/board");
+  revalidatePath("/");
   return data as Task;
 }
 
@@ -121,7 +121,7 @@ export async function deleteTask(id: string): Promise<void> {
   if (error) {
     throw new Error(`Delete failed: ${error.message}`);
   }
-  revalidatePath("/board");
+  revalidatePath("/");
 }
 
 const moveSchema = z.object({
@@ -149,5 +149,5 @@ export async function moveTask(input: MoveTaskInput): Promise<void> {
       }
     }
   }
-  revalidatePath("/board");
+  revalidatePath("/");
 }

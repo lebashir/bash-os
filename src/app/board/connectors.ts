@@ -59,5 +59,5 @@ export async function disconnectAccount(
     throw new Error(`Failed to disconnect ${accountEmail}: ${error.message}`);
   }
 
-  revalidatePath("/board");
+  revalidatePath("/");
 }

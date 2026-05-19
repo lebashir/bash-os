@@ -23,7 +23,7 @@ export async function syncCalendar(): Promise<SyncCalendarResult> {
 
   const result = await syncCalendarForUser(supabase, user.id);
   if (result.totalCreated > 0) {
-    revalidatePath("/board");
+    revalidatePath("/");
   }
   return result;
 }

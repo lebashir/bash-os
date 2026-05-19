@@ -99,7 +99,7 @@ export async function GET(request: NextRequest) {
   // Invalidate the cached /board render so a user opening the page in the
   // morning sees the freshly-synced items + the newest brief in the drawer
   // without a hard refresh.
-  revalidatePath("/board");
+  revalidatePath("/");
 
   return NextResponse.json({
     ok: true,

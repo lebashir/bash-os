@@ -188,7 +188,7 @@ export async function createDecomposedChildren(
 
   if (error) throw new Error(`Failed to create children: ${error.message}`);
 
-  revalidatePath("/board");
+  revalidatePath("/");
   return (data ?? []) as Task[];
 }
 

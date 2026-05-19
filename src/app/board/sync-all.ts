@@ -56,7 +56,7 @@ export async function syncAll(): Promise<SyncAllResult> {
     ("totalCreated" in slack && slack.totalCreated > 0) ||
     ("totalCreated" in jira && jira.totalCreated > 0);
   if (createdSomething) {
-    revalidatePath("/board");
+    revalidatePath("/");
   }
 
   return { gmail, calendar, slack, jira };
