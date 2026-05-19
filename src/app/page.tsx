@@ -1,11 +1,14 @@
 import { redirect } from "next/navigation";
 import { Toaster } from "@/components/ui/sonner";
 import { FlashToaster } from "@/components/board/FlashToaster";
+import { BoardPanel } from "@/components/home/BoardPanel";
 import { BriefPanel } from "@/components/home/BriefPanel";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeShell } from "@/components/home/HomeShell";
 import { TimelinePanel } from "@/components/home/TimelinePanel";
+import { listTasks } from "@/app/board/actions";
 import { getBriefState } from "@/app/board/brief-state";
+import { listColumns } from "@/app/board/column-actions";
 import { getTimelineEvents } from "@/app/board/timeline";
 import { listConnectedAccounts } from "@/app/board/connectors";
 import { computeConnectorPills } from "@/lib/board/connector-status";
@@ -42,10 +45,19 @@ export default async function Home({ searchParams }: HomeProps) {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [accounts, briefState, timelineEvents, flash] = await Promise.all([
+  const [
+    accounts,
+    briefState,
+    timelineEvents,
+    columns,
+    tasks,
+    flash,
+  ] = await Promise.all([
     listConnectedAccounts(),
     getBriefState(),
     getTimelineEvents(),
+    listColumns(),
+    listTasks(),
     searchParams,
   ]);
   const pills = computeConnectorPills(accounts);
@@ -62,18 +74,7 @@ export default async function Home({ searchParams }: HomeProps) {
       }
       brief={<BriefPanel state={briefState} />}
       timeline={<TimelinePanel events={timelineEvents} />}
-      board={
-        <>
-          <div className="h-9 px-3 border-b border-[var(--bash-border-subtle)] flex items-center text-[11px] text-[var(--bash-text-muted)] bg-[var(--bash-panel)]">
-            board
-          </div>
-          <div className="flex-1 px-3 py-4 text-[11px] text-[var(--bash-text-dim)] leading-[1.4]">
-            kanban panel lands in phase 5 — user-managed columns, drag and drop,
-            tags, filter and sort will render here. tasks are migrated; the data
-            is intact.
-          </div>
-        </>
-      }
+      board={<BoardPanel initialColumns={columns} initialTasks={tasks} />}
       agentActivity={
         <>
           <PanelTitle>agent activity</PanelTitle>
