@@ -130,18 +130,42 @@ Nothing about R3.5 blocks these; they were trimmed for scope.
 
 ---
 
-## R4 — Autonomous Claude-owned tasks — 🔮 Sketched
+## R4 — Local Claude Code daemon executes Claude-owned tasks — 🔜 Planned, not started
 
-- *Why it matters:* R3.5 made `owner='claude'` a first-class field but nothing happens automatically when a task is assigned to Claude. R4 makes Claude-owned tasks actually execute on their own.
-- *Rough shape:* A Vercel Cron job (separate from the morning sync) scans for tasks with `owner='claude'` ready to execute. For each, it invokes a worker agent with the same `ToolLoopAgent` tools the chat already has, plus task-specific tools (web fetch, file write, draft-email, draft-comment). The agent runs autonomously, produces an output, and moves the task into the Review column (sets `needs_review=true`) with the output attached to `description` for Bashir to approve or kick back.
-- Key questions to resolve before R4 can start: how to bound autonomous execution (token budget, time budget, tool-call count); how to handle agent failures (retry vs surface as error); how to render the agent's output in the Review card (markdown? link out? attachment?).
+- *Why it matters:* R3.5 made `owner='claude'` a first-class field but nothing happens automatically when a task is assigned to Claude. R4 turns that field into a real execution trigger — Bashir marks a task `owner='claude'`, the daemon picks it up, Claude Code runs the task, the output lands in Review for Bashir to approve.
+- *Rough shape (Pattern B from tonight's planning conversation):* the executor is a long-running daemon on Bashir's laptop (separate repo, `bash-os-daemon`), not a Vercel agent. It polls the bash-os API every 30s for `owner='claude'` tasks in pickable state, launches Claude Code headless with a task-derived prompt, hooks POST progress events to `/api/agent-events` as work happens. On successful exit the daemon moves the task to Review with `needs_review=true` and a populated `tasks.output` field. Bashir's "Approve" → Done; "Reject with feedback" → back to Active with the feedback appended.
+- *Out of scope:* self-selection (R5), autonomous task creation (R6), autonomous decomposition (R7), continuous mode (R8).
+- *Cross-cutting constraint:* R4 has to bake in the five design considerations from `docs/ARCHITECTURE.md` → "Autonomous agent loop architecture (planned)" — trust boundary (`requires_review`), cost budgets, decision auditability, stop conditions, review-queue backpressure. Even though R4 only implements the daemon execution slice, the slice has to respect them so R5-R8 can layer on without retrofitting.
+- *Prompt:* see `docs/cc-prompts/r4-pattern-b-daemon.md` (DRAFT — flesh out with Bashir before running).
 
 ---
 
-## R5 — Personal domains + AI Gateway — 🔮 Sketched
+## R5 — Claude self-evaluates the Inbox — 🔮 Sketched
 
-- **Personal-life domains.** Bills, appointments, anniversaries, car registration. The kanban handles work + delegation well; R5 extends it to the rest of life. Likely shape: a dedicated set of recurring-task generators (Vercel Cron) that drop reminders into `things to think about` ahead of due dates. Specific generators for: monthly bill payment reminders (a "bills" YAML or table), annual renewals (registration, insurance), birthday/anniversary lookups.
-- **AI Gateway swap.** Currently deferred — production runs on the direct Google API with `GEMINI_API_KEY`. Swapping to Vercel AI Gateway unlocks observability (per-model latency / cost dashboards), multi-provider routing, and easy model swaps (`google/gemini-3-flash` non-preview is in the Gateway catalog). One-line model-string change in `src/lib/gemini/client.ts` once `AI_GATEWAY_API_KEY` is in env. Per-token cost is identical (BYOK keeps the existing Gemini free tier intact).
+- *Why it matters:* R4 still requires Bashir to manually mark `owner='claude'` on each task he wants delegated. R5 lets Claude pick on its own from the Inbox, against a policy file Bashir maintains.
+- *Rough shape:* the daemon extends beyond `owner='claude'` to scanning the Inbox column. For each Inbox item it runs an LLM judgment call ("should I take this?") against a per-project `claude_policy.yaml` defining rules like "research = always, outreach = never, code edits to Doxi = yes, edits to bash-os = never". On yes: set `owner='claude'`, move to Today, proceed like R4. On no: leave the task for Bashir. Captures the decision in a new `tasks.decision_reason text` column (migration lands when R5 starts).
+
+---
+
+## R6 — Claude adds tasks autonomously — 🔮 Sketched
+
+- *Why it matters:* During execution Claude often surfaces a follow-up that's its own piece of work. Today it can only mention the follow-up in its output for Bashir to manually capture. R6 lets Claude call the existing `createTask` path on its own, with a captured `decision_reason`.
+- *Rough shape:* mid-execution, when Claude identifies a separate piece of work, it calls the same `createTask` server action the chat command bar uses. New rows get an "added by claude" marker (could reuse `owner='claude'` + the `decision_reason` from R5) and inherit the parent's tags + project. Same trust rules — irreversible follow-ups (`requires_review=true`) are routed to Review on creation, not on completion.
+- *Prerequisite:* the AI Gateway swap (`docs/KNOWN_ISSUES.md` #2) should land before R6 so per-token cost dashboards exist for cost-budget enforcement. R4 starts that pressure; R6 makes it mandatory.
+
+---
+
+## R7 — Claude decomposes autonomously — 🔮 Sketched
+
+- *Why it matters:* R3b's "Break it down" tool is human-triggered. R7 lets Claude call decompose on itself when a task feels too big mid-execution, following the same propose-then-confirm contract.
+- *Rough shape:* the existing `decomposeTask` path runs unchanged; the new piece is the daemon deciding when to invoke it. Children land with `parent_id` set and follow the same trust + budget rules as any Claude-created task. Tree depth capped at R3b's two-level limit unless R7 explicitly lifts it (decision deferred to when R7 starts).
+
+---
+
+## R8 — Continuous autonomous loop with human checkpoints — 🔮 Sketched
+
+- *Why it matters:* R4-R7 are episodic — daemon picks one task, finishes, picks the next. R8 weaves them into a continuous mode where the daemon stays warm, Claude works concurrently with Bashir, both add/move/complete tasks, Bashir reviews periodically.
+- *Rough shape:* "quiet mode" / "active mode" toggles on the daemon. Quiet = polling stops, the queue accumulates, no new starts; active = warm worker pool, multiple tasks in flight, brief panel surfaces in-flight counts. Personal-life domains (bills, anniversaries, registrations, car renewals) fall out naturally from R8 + R3.5c's recurring tasks — the daemon picks recurring-task instances the same way it picks any other Claude-owned task. **Not a separate round.**
 
 ---
 
