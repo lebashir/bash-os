@@ -3,11 +3,13 @@ import { Toaster } from "@/components/ui/sonner";
 import { FlashToaster } from "@/components/board/FlashToaster";
 import { BoardPanel } from "@/components/home/BoardPanel";
 import { BriefPanel } from "@/components/home/BriefPanel";
+import { CommandBar } from "@/components/home/CommandBar";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeShell } from "@/components/home/HomeShell";
 import { TimelinePanel } from "@/components/home/TimelinePanel";
 import { listTasks } from "@/app/board/actions";
 import { getBriefState } from "@/app/board/brief-state";
+import { listChatUIMessages } from "@/app/board/command-actions";
 import { listColumns } from "@/app/board/column-actions";
 import { getTimelineEvents } from "@/app/board/timeline";
 import { listConnectedAccounts } from "@/app/board/connectors";
@@ -51,6 +53,7 @@ export default async function Home({ searchParams }: HomeProps) {
     timelineEvents,
     columns,
     tasks,
+    chatHistory,
     flash,
   ] = await Promise.all([
     listConnectedAccounts(),
@@ -58,6 +61,7 @@ export default async function Home({ searchParams }: HomeProps) {
     getTimelineEvents(),
     listColumns(),
     listTasks(),
+    listChatUIMessages(),
     searchParams,
   ]);
   const pills = computeConnectorPills(accounts);
@@ -87,17 +91,7 @@ export default async function Home({ searchParams }: HomeProps) {
           <PanelPlaceholder note="context panel lands in later phases — selected task details, chat history, snoozed items." />
         </>
       }
-      commandBar={
-        <div className="h-10 border-t border-[var(--bash-border-subtle)] bg-[var(--bash-panel)] flex items-center px-3 gap-2 shrink-0">
-          <span className="px-1.5 py-0.5 text-[10px] text-[var(--bash-text-muted)] border border-[var(--bash-border-subtle)] rounded-[3px] font-mono">
-            ⌘K
-          </span>
-          <span className="text-[11px] text-[var(--bash-text-dim)] flex-1">
-            command bar lands in phase 7 — type a command, ask the agent, or
-            paste to capture.
-          </span>
-        </div>
-      }
+      commandBar={<CommandBar initialMessages={chatHistory} />}
     />
     <Toaster richColors position="bottom-right" />
     <FlashToaster connected={flash.connected} error={flash.error} />
