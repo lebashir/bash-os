@@ -1,8 +1,10 @@
 import { redirect } from "next/navigation";
 import { Toaster } from "@/components/ui/sonner";
 import { FlashToaster } from "@/components/board/FlashToaster";
+import { BriefPanel } from "@/components/home/BriefPanel";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeShell } from "@/components/home/HomeShell";
+import { getBriefState } from "@/app/board/brief-state";
 import { listConnectedAccounts } from "@/app/board/connectors";
 import { computeConnectorPills } from "@/lib/board/connector-status";
 import { createClient } from "@/lib/supabase/server";
@@ -38,8 +40,9 @@ export default async function Home({ searchParams }: HomeProps) {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [accounts, flash] = await Promise.all([
+  const [accounts, briefState, flash] = await Promise.all([
     listConnectedAccounts(),
+    getBriefState(),
     searchParams,
   ]);
   const pills = computeConnectorPills(accounts);
@@ -54,12 +57,7 @@ export default async function Home({ searchParams }: HomeProps) {
           pills={pills}
         />
       }
-      brief={
-        <>
-          <PanelTitle>brief</PanelTitle>
-          <PanelPlaceholder note="brief panel lands in phase 3 — attention bars + day update will render here." />
-        </>
-      }
+      brief={<BriefPanel state={briefState} />}
       timeline={
         <>
           <PanelTitle>today</PanelTitle>
