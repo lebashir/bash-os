@@ -1,77 +1,98 @@
-# Overnight session report — 2026-05-19 → 2026-05-20
+# R3.5 overnight report — 2026-05-19
 
-One-shot file. Read it once in the morning, then delete.
+One-shot. Delete this file after reading.
 
-## Summary
+## Phases
 
-R3a + R3b shipped to prod. R5b skipped because `AI_GATEWAY_API_KEY` isn't in env. No phases blocked, no failed retries, no scope creep.
+| # | Phase | Status |
+|---|---|---|
+| 1 | Schema + data migration | ✅ |
+| 2 | Layout shell at `/` | ✅ |
+| 3 | Brief panel rebuild | ✅ |
+| 4 | Timeline panel | ✅ |
+| 5 | Custom columns + kanban features | ✅ partial — see 5c below |
+| 6 | Owner UX | ✅ (folded into 5) |
+| 7 | Command bar | ✅ |
+| 8 | Agent activity endpoint + feed | ✅ |
+| 9 | Email triage + snooze | ✅ |
+| 10 | Visual sweep + docs | ✅ |
+| 5c | Filter & sort, recurring tasks UI + cron, right-panel chat history | ⏸ deferred — listed in `docs/KNOWN_ISSUES.md` + `docs/ROUNDS.md` |
 
-| Phase | Status | Commit | Migration on dev | Migration on prod |
-|---|---|---|---|---|
-| R3a — email importance filtering | ✅ shipped | `14367fd` | ✅ | ✅ |
-| R3b — task decomposition | ✅ shipped | `c50ec6c` | ✅ | ✅ |
-| R5b — AI Gateway swap | ⏭️ skipped | — | — | — |
+## Schema migration verification
 
-## R3a — email importance filtering (commit 14367fd)
+Applied to **dev** (`bash-os-dev`, ref `xuqpifhojipuzqrowadt`) and **prod** (`bash-os`, ref `vbooingflkmzxcqnbvxr`) on 2026-05-19. Approved at Checkpoint 1.
 
-**What worked.** Whole phase landed cleanly in one pass. Migration: `tasks.importance smallint null`, no constraint so the threshold stays an app-code knob. Per-message Gemini 3 Flash call via `generateObject` + Zod schema returns `{ score: 1-10, reason: string }`. Below-4 messages dropped before upsert; survivors get `importance` persisted. Failure default is admit (score=5) so a model outage doesn't silently swallow real mail. `?show_filtered=1` re-runs sync with the filter disabled and tags admitted-low-score rows with `[filtered:N]` for spot-checking.
+### Dev (17 tasks)
+- by column: Active=12, Today=5
+- by owner: bash=17
+- needs_review=true: 0
+- null column_id: 0
+- `tasks.status` column: confirmed dropped
 
-**Rubric verification.** Five canonical fixtures scored on the first attempt:
-- Personal action request from boss → 10
-- Calendar invite (Bashir required) → 8
-- Newsletter (Pragmatic Engineer) → 4
-- Marketing promo (DataDog 50% off) → 1
-- CC chain noise → 4
+### Prod (23 tasks)
+- by column: Inbox=5, Today=6, Active=12
+- by owner: bash=23
+- needs_review=true: 0
+- null column_id: 0
+- `tasks.status` column: confirmed dropped
 
-All on the rubric's intended band. No prompt iteration needed.
+Both projects had no `Claude work` or `Boss Check` rows at migration time, so the (owner='claude') and (needs_review=true) mappings stayed dormant — but the SQL covers them. Five starter columns (Inbox / Today / Active / Review / Done) seeded for the user on each project with the exact icons + accent colors from the spec.
 
-**Rough edges.** None significant. The `show_filtered=1` path triggers a sync side-effect on page render — deliberate, but worth knowing if a stray refresh ever surprises you. Live verification through the browser was skipped (would need OAuth dance); scoring was validated by direct fixture tests, not against a real Gmail inbox. If the rubric misbehaves in production, edit the system prompt in `src/lib/board/email-importance.ts`.
+## Synthetic data on dev
 
-## R3b — task decomposition (commit c50ec6c)
+During Phase 3 brief-panel verification I inserted five test rows on `bash-os-dev` to exercise the attention bars:
 
-**What worked.** Migration: `parent_id uuid` self-FK with `ON DELETE CASCADE`, plus a partial index. Hover-revealed split icon on TaskCard opens DecomposeDialog, which calls `decomposeTask` server action → Gemini returns 2-5 children classified into Bash work / Claude work / Boss Check. User edits inline (title, description, column), toggles per-row checkboxes, hits Create. `createDecomposedChildren` inserts with `parent_id` set and `source_id` of `{parent.source_id ?? parent.id}/{slug}`. TaskDialog shows a faded `↑ parent: <title>` line when viewing a child.
+- 1 calendar event due in 10 min (source_id `r35-test-calendar-imminent`)
+- 1 overdue task (source_id `r35-test-overdue`)
+- 1 urgent gmail task with `importance=10` (source_id `r35-test-urgent-email`)
+- 1 needs_review task with `owner='claude'` (source_id `r35-test-needs-review`)
+- 1 pending_emails row (`gmail_message_id` = `r35-test-pending-1`)
 
-**Rubric verification.** Three fixtures, sensible decompositions on first attempt:
-- "Ship the new pricing flow" → 4 children: define tiers (Bash), draft copy (Claude), review mockups (Boss Check), deploy (Bash).
-- "Respond to Q3 marketing roundtable invite" → 3 children: check calendar (Bash), draft response (Claude), review and send (Boss Check). Clean check-draft-review flow.
-- "Fix the dashboard latency regression" → 3 children: log analysis (Claude), strategy decision (Bash), draft PR (Boss Check).
+Safe to leave in place for ongoing UI verification. To remove:
 
-No prompt iteration needed.
+```sql
+delete from public.tasks where source_id like 'r35-test-%';
+delete from public.pending_emails where gmail_message_id like 'r35-test-%';
+```
 
-**Rough edges.** The "Break it down" button is a hover-revealed icon, which means it's invisible on touch devices unless the user explicitly long-presses (haven't tried this). For desktop use it's fine. The decompose button's pointer/mouse event stops are split between `onMouseDown` and `onPointerDown` because @dnd-kit's PointerSensor uses the latter — without both stops, the click would initiate a drag. Subtle; left a comment in `TaskCard.tsx` explaining it.
+## Prompt iteration
 
-Not exercised end-to-end through the browser. Typecheck passes; lucide-react `Split` icon was verified present. If something does fail at runtime, the failure path most likely lies in @dnd-kit drag interference or @base-ui Dialog focus management on the editable input rows.
+None. R3.5 only touches one LLM call — the decomposition prompt in `src/app/board/decompose-actions.ts` — and the change was structural (the LLM still classifies into "Bash work" / "Claude work" / "Boss Check" kinds; app code maps each to a (column_id, owner, needs_review) tuple at insert time). The R3a importance scorer's prompt and rubric are unchanged.
 
-## R5b — AI Gateway swap, skipped
+## Tokens
 
-`AI_GATEWAY_API_KEY` isn't set in `.env.local`. Per the spec, R5b is deferred. To pick it up:
+- `AGENT_EVENTS_TOKEN` generated for both environments:
+  - dev: written to `.env.local`
+  - prod: set via `vercel env add AGENT_EVENTS_TOKEN production`
+- Endpoint smoke-tested against dev: 401 on missing/bad bearer, 200 + persisted DB row on valid call.
 
-1. Vercel dashboard → AI → Keys → create a key. Copy it.
-2. `vercel env add AI_GATEWAY_API_KEY production` (and add to `.env.local`).
-3. Edit `src/lib/gemini/client.ts` → change `CHAT_MODEL_ID` from `gemini-3-flash-preview` to `google/gemini-3-flash`. Embedding stays direct (gateway doesn't proxy embeddings).
-4. Smoke test: send a chat message, trigger the cron locally (`curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/daily-brief`), check both work.
-5. Update `docs/KNOWN_ISSUES.md` (issues #1 + #2) and `docs/ROUNDS.md` (add R5b entry). Commit `feat: R5b AI Gateway swap`.
+## Crons
 
-## Items that needed 3+ iterations (none)
+- `/api/cron/daily-brief` (existing) — 05:30 UTC. Now only syncs Gmail + Calendar and writes an `agent_events` "morning sync" row per user. Brief generation removed (deterministic panel).
+- `/api/cron/unsnooze` (new) — 20:05 UTC. Clears expired `snoozed_until` on tasks + pending_emails.
 
-Neither rubric needed any prompt-tuning iteration. The system prompts you read into the codebase are the originals from the first attempt.
+Both are declared in `vercel.json`. Both verify `Authorization: Bearer $CRON_SECRET`.
 
-## Suggested morning verification — in this order
+## First thing to verify in the morning
 
-1. **Pull and smoke build.** `git pull && pnpm install && pnpm dev`. Visit `http://localhost:3000/board`.
-2. **R3a:** click Sync. Watch the toast for `gmail: created N` — confirm it's lower than what the inbox actually has. Then visit `http://localhost:3000/board?show_filtered=1`. You should see new tasks with `[filtered:N]` prefixes for the ones the rubric dropped. Eyeball five or so; if anything obviously misclassified, edit the system prompt in `src/lib/board/email-importance.ts` and resync.
-3. **R3b:** hover any non-child task in the board. A split icon should appear top-right. Click it. The DecomposeDialog should open, show a loading state for ~2 seconds, then render 2-5 proposed children. Pick one, click Create. Confirm the children appear in the columns the rubric routed them to. Open one of the newly-created children — its TaskDialog should show `↑ parent: <title>` above the title, and hovering the child card on the board should NOT show the split icon (children can't decompose further).
-4. **Nothing visibly broken in chat or briefs.** Both still route through the direct Google API; nothing about R3 should have touched them.
+1. Open `https://bash-os.vercel.app/`. The three-panel + command bar shell should render. Header shows connector pills + account menu.
+2. Drag a card between columns. The timeline panel should pick up a "moved" entry for it.
+3. Add a column via the "+" at the end of the row. Rename it. Delete it (prompted for destination).
+4. Type `task: pick up dry cleaning` in the command bar. Should land in Inbox without an LLM call.
+5. Type `what's on my plate today?` in the command bar. Should stream a response in the popover above the bar.
+6. Right-panel feed should show today's `chat`-source events from step 5.
+7. Trigger the morning cron manually if you want to confirm: `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. The right-panel feed should then show a `cron / morning sync` event.
 
-## What did NOT change
+## What's NOT shipped that the original spec listed
 
-- Chat agent (`src/lib/board/chat.ts`) — no new tools, no system-prompt edits.
-- Brief generation (`src/lib/board/brief.ts`) — untouched.
-- Connectors other than Gmail — Calendar, Jira, Slack untouched.
-- The 7-status CHECK constraint — untouched.
-- `tasks.source` CHECK — untouched.
-- RLS policies — no new tables, all reads stay through the cookie-bound client.
+- Filter & sort controls on the board header (+ localStorage persistence)
+- Recurring tasks: `RepeatsPicker` in TaskDialog and the hourly `/api/cron/recurrences` route (the `public.recurrences` schema *did* ship)
+- "Show chat history" affordance in the right-panel context section
 
-## Stop instructions (per the spec)
+Tag picker on the TaskDialog *did* ship (with chip display on cards).
 
-Do not start R4. Do not start R5a. Do not look at Slack. Do not "just polish" anything. This file can be deleted once read.
+All deferred items are tracked in `docs/KNOWN_ISSUES.md` and `docs/ROUNDS.md` under the **R3.5c** sub-round.
+
+## Stop
+
+R4 is not started. Per the spec.
