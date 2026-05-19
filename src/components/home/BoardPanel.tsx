@@ -6,8 +6,11 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
+  pointerWithin,
+  rectIntersection,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -48,6 +51,26 @@ const COLOR_SWATCHES = [
   "#5a5a60",
   "#e5e5ea",
 ];
+
+// Prefer column droppables when the pointer is inside a column body; fall
+// back to closestCenter so reordering within a column still works. Plain
+// closestCenter snaps to the nearest *card* in an adjacent dense column
+// even when the pointer is visually inside the empty target, so dragging
+// into empty columns (Review / Done) silently bounces back.
+const collisionDetectionStrategy: CollisionDetection = (args) => {
+  const pointerHits = pointerWithin(args);
+  const columnHits = pointerHits.filter(
+    (c) => c.data?.droppableContainer?.data?.current?.kind === "column",
+  );
+  if (columnHits.length > 0) return columnHits;
+  const rectHits = rectIntersection(args);
+  const rectColumnHits = rectHits.filter(
+    (c) => c.data?.droppableContainer?.data?.current?.kind === "column",
+  );
+  if (rectColumnHits.length > 0 && pointerHits.length === 0)
+    return rectColumnHits;
+  return closestCenter(args);
+};
 
 export function BoardPanel({ initialColumns, initialTasks }: BoardPanelProps) {
   const [columns, setColumns] = useState<Column[]>(initialColumns);
@@ -328,7 +351,7 @@ export function BoardPanel({ initialColumns, initialTasks }: BoardPanelProps) {
       </div>
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={collisionDetectionStrategy}
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}

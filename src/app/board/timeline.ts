@@ -1,5 +1,6 @@
 "use server";
 
+import { loadColumnLookup } from "@/lib/board/columns";
 import { createClient } from "@/lib/supabase/server";
 
 // Timeline panel data. Returns calendar events (from public.tasks rows
@@ -38,9 +39,16 @@ interface TaskEventRow {
   event_type: string;
   metadata: Record<string, unknown> | null;
   created_at: string;
-  // PostgREST returns embedded relations as arrays. The FK is many-to-one so
-  // at most one row appears.
-  tasks: { title: string | null }[] | null;
+  // PostgREST returns embedded relations as a single object for many-to-one
+  // FKs; the Supabase JS types still widen to an array. Accept both shapes
+  // so the title falls through whichever the runtime hands us.
+  tasks: { title: string | null } | { title: string | null }[] | null;
+}
+
+function extractJoinedTitle(t: TaskEventRow["tasks"]): string {
+  if (!t) return "(task)";
+  if (Array.isArray(t)) return t[0]?.title ?? "(task)";
+  return t.title ?? "(task)";
 }
 
 export async function getTimelineEvents(): Promise<TimelineEvent[]> {
@@ -58,7 +66,7 @@ export async function getTimelineEvents(): Promise<TimelineEvent[]> {
     now + DEFAULT_DAY_LOOKAHEAD_HOURS * 60 * 60 * 1000,
   ).toISOString();
 
-  const [calendarRes, eventsRes] = await Promise.all([
+  const [calendarRes, eventsRes, columnLookup] = await Promise.all([
     supabase
       .from("tasks")
       .select("id, title, due_date")
@@ -75,6 +83,7 @@ export async function getTimelineEvents(): Promise<TimelineEvent[]> {
       .lte("created_at", toIso)
       .order("created_at", { ascending: false })
       .limit(200),
+    loadColumnLookup(supabase, user.id),
   ]);
 
   if (calendarRes.error || eventsRes.error) return [];
@@ -92,7 +101,7 @@ export async function getTimelineEvents(): Promise<TimelineEvent[]> {
 
   const taskEvents: TimelineEvent[] = (
     (eventsRes.data ?? []) as TaskEventRow[]
-  ).map((r) => mapTaskEvent(r));
+  ).map((r) => mapTaskEvent(r, columnLookup.byId));
 
   const combined = [...calendarEvents, ...taskEvents]
     .filter((e) => Number.isFinite(Date.parse(e.at)))
@@ -101,8 +110,11 @@ export async function getTimelineEvents(): Promise<TimelineEvent[]> {
   return combined;
 }
 
-function mapTaskEvent(row: TaskEventRow): TimelineEvent {
-  const title = row.tasks?.[0]?.title ?? "(task)";
+function mapTaskEvent(
+  row: TaskEventRow,
+  columnsById: Map<string, string>,
+): TimelineEvent {
+  const title = extractJoinedTitle(row.tasks);
   const metadata = row.metadata ?? {};
   switch (row.event_type) {
     case "created":
@@ -123,17 +135,22 @@ function mapTaskEvent(row: TaskEventRow): TimelineEvent {
         at: row.created_at,
         title,
       };
-    case "moved":
+    case "moved": {
+      // moveTask writes UUIDs in metadata (to_column_id / from_column_id) so
+      // a column rename doesn't retroactively break the event log. Resolve
+      // to a human-readable name at read time. Falls back to "?" if the
+      // column has been deleted since.
+      const toId = metadata.to_column_id;
+      const toName =
+        typeof toId === "string" ? (columnsById.get(toId) ?? "?") : undefined;
       return {
         id: row.id,
         kind: "task-moved",
         at: row.created_at,
         title,
-        meta:
-          typeof metadata.to_column === "string"
-            ? `to ${metadata.to_column}`
-            : undefined,
+        meta: toName ? `to ${toName}` : undefined,
       };
+    }
     case "deleted":
       return { id: row.id, kind: "task-deleted", at: row.created_at, title };
     default:
