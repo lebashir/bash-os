@@ -8,6 +8,7 @@ import { CommandBar } from "@/components/home/CommandBar";
 import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeShell } from "@/components/home/HomeShell";
 import { TimelinePanel } from "@/components/home/TimelinePanel";
+import { TriageController } from "@/components/home/TriageController";
 import { listTasks } from "@/app/board/actions";
 import { listAgentEvents } from "@/app/board/agent-events";
 import { getBriefState } from "@/app/board/brief-state";
@@ -94,6 +95,7 @@ export default async function Home({ searchParams }: HomeProps) {
     />
     <Toaster richColors position="bottom-right" />
     <FlashToaster connected={flash.connected} error={flash.error} />
+    <TriageController />
     </>
   );
 }

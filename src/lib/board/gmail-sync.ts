@@ -161,8 +161,15 @@ async function syncOneAccount(
 
   const basePosition = (maxPos?.position ?? -1) + 1;
 
+  // R3.5 routes scored messages three ways:
+  //   score >= AUTOTASK_THRESHOLD  -> insert as task in Inbox (existing path)
+  //   IMPORTANCE_THRESHOLD <= score < AUTOTASK_THRESHOLD
+  //                                -> insert into pending_emails (triage queue)
+  //   score < IMPORTANCE_THRESHOLD -> drop silently (or admit if showFiltered)
+  const AUTOTASK_THRESHOLD = 8;
+
   const showFiltered = options.showFiltered === true;
-  const rows: Array<{
+  const taskRows: Array<{
     user_id: string;
     title: string;
     description: string;
@@ -174,60 +181,103 @@ async function syncOneAccount(
     position: number;
     importance: number;
   }> = [];
+  const pendingRows: Array<{
+    user_id: string;
+    gmail_message_id: string;
+    subject: string;
+    sender: string;
+    snippet: string | null;
+    score: number;
+  }> = [];
+
   let filtered = 0;
   let nextPosition = basePosition;
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const score = scores[i];
-    const isLowImportance = score.score < IMPORTANCE_THRESHOLD;
-
-    if (isLowImportance && !showFiltered) {
-      filtered += 1;
-      continue;
-    }
-
     const rawSubject = headerValue(msg, "Subject") ?? "(no subject)";
     const from = headerValue(msg, "From") ?? "(unknown sender)";
     const snippet = decodeSnippet(msg.snippet);
-    const title =
-      isLowImportance && showFiltered
-        ? `[filtered:${score.score}] ${rawSubject}`
-        : rawSubject;
 
-    rows.push({
-      user_id: userId,
-      title,
-      description: `From: ${from}\n\n${snippet}`,
-      column_id: inboxColumnId,
-      owner: "bash",
-      source: "gmail",
-      source_account: accountEmail,
-      source_id: msg.id,
-      position: nextPosition,
-      importance: score.score,
-    });
-    nextPosition += 1;
+    if (score.score >= AUTOTASK_THRESHOLD) {
+      taskRows.push({
+        user_id: userId,
+        title: rawSubject,
+        description: `From: ${from}\n\n${snippet}`,
+        column_id: inboxColumnId,
+        owner: "bash",
+        source: "gmail",
+        source_account: accountEmail,
+        source_id: msg.id,
+        position: nextPosition,
+        importance: score.score,
+      });
+      nextPosition += 1;
+      continue;
+    }
+
+    if (score.score >= IMPORTANCE_THRESHOLD) {
+      pendingRows.push({
+        user_id: userId,
+        gmail_message_id: msg.id,
+        subject: rawSubject,
+        sender: from,
+        snippet: snippet.slice(0, 800),
+        score: score.score,
+      });
+      continue;
+    }
+
+    // score < IMPORTANCE_THRESHOLD
+    if (showFiltered) {
+      taskRows.push({
+        user_id: userId,
+        title: `[filtered:${score.score}] ${rawSubject}`,
+        description: `From: ${from}\n\n${snippet}`,
+        column_id: inboxColumnId,
+        owner: "bash",
+        source: "gmail",
+        source_account: accountEmail,
+        source_id: msg.id,
+        position: nextPosition,
+        importance: score.score,
+      });
+      nextPosition += 1;
+    } else {
+      filtered += 1;
+    }
   }
 
-  if (rows.length === 0) {
-    return { accountEmail, created: 0, skipped: 0, filtered };
+  let created = 0;
+  let skipped = 0;
+  if (taskRows.length > 0) {
+    const { data: inserted, error } = await supabase
+      .from("tasks")
+      .upsert(taskRows, {
+        onConflict: "user_id,source,source_account,source_id",
+        ignoreDuplicates: true,
+      })
+      .select("id");
+    if (error) {
+      throw new Error(`Gmail sync upsert failed: ${error.message}`);
+    }
+    created = inserted?.length ?? 0;
+    skipped = taskRows.length - created;
   }
 
-  const { data: inserted, error } = await supabase
-    .from("tasks")
-    .upsert(rows, {
-      onConflict: "user_id,source,source_account,source_id",
-      ignoreDuplicates: true,
-    })
-    .select("id");
-
-  if (error) {
-    throw new Error(`Gmail sync upsert failed: ${error.message}`);
+  if (pendingRows.length > 0) {
+    const { error } = await supabase
+      .from("pending_emails")
+      .upsert(pendingRows, {
+        onConflict: "user_id,gmail_message_id",
+        ignoreDuplicates: true,
+      });
+    if (error) {
+      console.warn(`[gmail-sync] pending_emails upsert failed: ${error.message}`);
+    }
   }
 
-  const created = inserted?.length ?? 0;
-  const skipped = rows.length - created;
   return { accountEmail, created, skipped, filtered };
 }
 
