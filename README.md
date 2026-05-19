@@ -2,7 +2,7 @@
 
 ## What Bash OS is
 
-A personal life-OS for one person (Bashir). A seven-column kanban is the surface; behind it sits a Supabase store, a set of connectors that ingest signals from Gmail, Google Calendar, and Jira into the board, a chat assistant that can read the board and take action through tool-calls, a long-term memory layer that the assistant retrieves from per turn, and a daily brief generated each morning by a scheduled job. The kanban is the visible part; the rest is the operating system underneath it.
+A personal life-OS for one person (Bashir). A three-panel homepage at `/` is the surface: a deterministic brief + a vertical-axis timeline on the left, a user-managed kanban board in the middle, an agent-activity feed on the right, and a persistent command bar across the bottom. Behind it sits a Supabase store, a set of connectors that ingest signals from Gmail, Google Calendar, and Jira, a chat assistant that can read the board and take action through tool-calls, a long-term memory layer that the assistant retrieves from per turn, and a `/api/agent-events` ingestion endpoint that lets external workers (a Claude Code hook, a Cowork session, anything) surface their activity on the right-panel feed.
 
 ## Stack
 
@@ -18,7 +18,18 @@ A personal life-OS for one person (Bashir). A seven-column kanban is the surface
 
 ## Architecture overview
 
-The board is the only thing the user looks at. Tasks live in `public.tasks`, gated by RLS so the Supabase clients only ever see one user's rows. Connectors run server-side: Gmail and Google Calendar use multi-account OAuth with refresh tokens stored in `connector_tokens`; Jira uses a personal access token from env. Each connector pulls fresh items and `upsert`s them into `tasks` with `source` set to its name, deduped on `(user_id, source, source_account, source_id)`. The chat drawer is powered by AI SDK's `useChat` calling a streaming `/api/chat` route; that route builds a per-turn context (board state, calendar next-24h, recent emails, top-K semantically matched memories) and runs a `ToolLoopAgent` with four mutating tools (`createTask`, `moveTask`, `updateTask`, `deleteTask`) and two read tools (`findTasks`, `findMemories`). Memory writes happen via the "Remember" button on user messages, which embeds the content and inserts into `public.memories`; memory reads happen automatically every chat turn via a pgvector `match_memories` RPC. A Vercel Cron job at 5:30 UTC (9:30am Dubai) re-syncs each user's connectors and generates a daily brief into `public.briefs`, surfaced through a right-side `BriefDrawer` on the board.
+Tasks live in `public.tasks` and belong to user-managed columns in `public.columns` (R3.5 — the R1 7-status CHECK was retired in `20260519060000`). RLS gates everything on `auth.uid() = user_id`. The homepage at `/` (the only board surface — `/board` is a redirect) is a three-panel + command bar shell:
+
+- **Left panel** — deterministic brief (attention bars for calendar / overdue / urgent emails / needs-review / triage queue / unsnoozed; plus a "next event" card with "N on plate · M urgent · K in inbox" stats) above a vertical-axis timeline that interleaves calendar events with `public.task_events` (created / moved / completed / deleted).
+- **Middle panel** — kanban board. Columns render dynamically from `public.columns`; drag to reorder. Each card shows owner icon (Bashir or Claude), priority dot, title, up to 2 tag chips. Drag-and-drop within and between columns. "+" at the end of the row adds a column inline; column header "..." menu handles rename / accent color / delete-with-destination.
+- **Right panel** — agent activity feed from `public.agent_events` (top section, polled every 30s) above a context placeholder.
+- **Command bar** — persistent at the bottom. ⌘K focus. Prefixes `task:` / `add:` / `capture:` / `todo:` short-circuit straight to a `createTask` server action (no LLM). Everything else streams chat through `/api/chat` into a popover above the bar.
+
+Connectors run server-side: Gmail and Google Calendar use multi-account OAuth with refresh tokens stored in `connector_tokens`; Jira uses a personal access token from env. Each connector resolves its target column (`Inbox` for gmail/slack, `Today` for calendar, `Active` for jira) via `resolveColumnId` and upserts into `tasks`, deduped on `(user_id, source, source_account, source_id)`. Gmail's R3a importance scorer now splits the admit band three ways: score 8-10 auto-task to Inbox, 4-7 → `public.pending_emails` (triage queue), 0-3 drop. The triage queue surfaces in the brief as an attention bar; clicking opens a keyboard-driven `TriageModal`.
+
+Chat backend is unchanged from R2.5: `/api/chat` builds a per-turn context (column-grouped board state, calendar next-24h, recent emails, top-K semantically matched memories from `match_memories`) and runs a `ToolLoopAgent` with four mutating tools (`createTask`, `moveTask`, `updateTask`, `deleteTask`) and two read tools (`findTasks`, `findMemories`). The tools take column **names** which resolve to ids server-side. Memory writes still happen via the "Remember" affordance; memory reads happen automatically per turn.
+
+A Vercel Cron at 5:30 UTC (9:30 Dubai) re-syncs Gmail + Calendar per user. The R2 LLM-generated brief was retired — the brief panel reads current state every page render. A second cron at 20:05 UTC (00:05 Dubai) clears expired snoozed_until on tasks and pending_emails.
 
 ## Prerequisites
 
@@ -71,6 +82,9 @@ Migrations (in apply order):
 | `20260519010000_r2_5_briefs_table.sql` | R2.5 — adds `public.briefs` with `unique (user_id, brief_date)`, deletes any existing brief-tasks, drops `'brief'` from the `tasks.source` CHECK. |
 | `20260519020000_r3a_tasks_importance.sql` | R3a — adds `tasks.importance smallint null` for the Gmail importance scorer. |
 | `20260519030000_r3b_tasks_parent_id.sql` | R3b — adds `tasks.parent_id uuid` (self-FK, ON DELETE CASCADE) + partial index for the task-decomposition feature. |
+| `20260519040000_r3_5_columns_and_owner.sql` | R3.5 — creates `columns` / `task_events` / `recurrences` / `agent_events` / `pending_emails`. Adds `tasks.column_id` (nullable), `owner`, `needs_review`, `tags`, `snoozed_until`. |
+| `20260519050000_r3_5_seed_columns_and_migrate_tasks.sql` | R3.5 — seeds 5 starter columns (Inbox / Today / Active / Review / Done) per user; back-fills `tasks.column_id` + `owner` from the legacy status mapping. Aborts if any row remains with null column_id. |
+| `20260519060000_r3_5_drop_status_column.sql` | R3.5 — destructive. Drops `tasks.status` and the old `tasks_user_status_position_idx`. Locks `tasks.column_id` to NOT NULL. |
 
 ## Environment variables
 
@@ -89,6 +103,7 @@ See `.env.example` for the canonical list. Quick reference:
 | `JIRA_EMAIL` | optional | Atlassian login email. |
 | `JIRA_API_TOKEN` | optional | Personal API token. |
 | `SLACK_USER_TOKEN` | optional | `xoxp-…` user token. Silently disables Slack connector when unset. See Known issues — currently blocked by org admin policy. |
+| `AGENT_EVENTS_TOKEN` | yes | Project-wide shared secret for the `/api/agent-events` ingestion endpoint. Generate with `node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))'`. Distinct values per environment. |
 
 ## Connectors
 
@@ -111,27 +126,73 @@ See `.env.example` for the canonical list. Quick reference:
 - Code lives at `src/lib/board/slack-sync.ts`. Reads `SLACK_USER_TOKEN` (a `xoxp-…` user token), calls `auth.test` to discover workspace + self ID, lists DM channels via `conversations.list?types=im`, pulls last 48h from each via `conversations.history`, drops the OTHER party's messages into `things to think about` deduped by `(channel:ts)`.
 - Bashir is not a workspace admin at Tabby and Slack killed legacy user tokens in 2020, so the token can't currently be obtained. The connector silently no-ops when `SLACK_USER_TOKEN` is unset, so the rest of the app is unaffected.
 
-## Chat tools
+## Command bar + chat tools
 
-The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has six tools, all scoped to the authenticated user via RLS.
+The chat used to live in a right-side drawer. R3.5 moved it into a persistent command bar at the bottom of `/`. ⌘K (Ctrl+K on non-Mac) focuses it from anywhere. Prefixes `task:` / `add:` / `capture:` / `todo:` short-circuit to a direct Inbox insert with no LLM call. Everything else POSTs to `/api/chat` and streams the response into a popover above the bar.
+
+The chat agent (`ToolLoopAgent` in `src/lib/board/chat.ts`) has six tools, all scoped to the authenticated user via RLS. Tools take column **names**, not ids — they're resolved server-side via `resolveColumnByName`.
 
 **Mutating tools** (board write access):
 
 | Tool | Purpose |
 |---|---|
-| `createTask` | Adds a new task. Defaults to `things to think about` unless the user says "today/now/urgent". |
-| `moveTask` | Resolves a task by title fragment (`ILIKE`) and moves it to a destination column. Positions to end of target column. |
-| `updateTask` | Resolves by title fragment; partial update of title/description/priority/status. |
+| `createTask` | Adds a new task. Defaults to `Inbox` for vague captures; uses `Today` only when the user explicitly says today/now/urgent. Accepts optional `owner` ('bash' default, 'claude' when the user asks Claude to do it). |
+| `moveTask` | Resolves by title fragment (`ILIKE`), moves to a destination column by name. |
+| `updateTask` | Resolves by title fragment; partial update of title/description/priority/column. |
 | `deleteTask` | Permanent removal. System prompt restricts to explicit user delete intent. |
 
-**Read tools** (look beyond the per-turn injected context):
+All mutating tools also insert a row into `public.task_events` so the timeline panel reflects the activity.
+
+**Read tools**:
 
 | Tool | Purpose |
 |---|---|
-| `findTasks` | Keyword + status/source filtered search across the full board (default 10, max 25). Reach for this when the truncated per-column snapshot won't cover the question. |
-| `findMemories` | Semantic search over `public.memories` with the same cosine-0.55 threshold as the auto-injection (default 5, max 10). Use when the agent needs to recall something the per-turn auto-injection didn't surface. |
+| `findTasks` | Keyword + column/source filtered search across the full board (default 10, max 25). Reach for this when the truncated per-column snapshot won't cover the question. |
+| `findMemories` | Semantic search over `public.memories` with the same cosine-0.55 threshold as the auto-injection (default 5, max 10). |
 
 Task resolution returns an "ambiguity" error with candidate titles when more than one task matches the fragment — the agent surfaces those to the user instead of guessing.
+
+## Agent activity ingestion
+
+External agents (Claude Code hooks, Cowork sessions, anything that wants to surface "I'm working on X right now") can POST to `/api/agent-events` to land a row in `public.agent_events`. The right-panel feed renders the latest 20 events, refreshing every 30s.
+
+```
+POST /api/agent-events
+Authorization: Bearer $AGENT_EVENTS_TOKEN
+Content-Type: application/json
+{
+  "user_id": "<uuid>",
+  "source":  "claude-code",
+  "project": "bash-os",                  // optional
+  "action":  "editing",
+  "target":  "src/queries.ts",           // optional
+  "payload": { "line": 42 }              // optional, arbitrary JSON
+}
+```
+
+Returns `{ ok: true, id, created_at }` on success, 401 on missing/bad bearer, 400 on schema violation. The token bypasses RLS via the admin client because the caller may be a worker with no Supabase session; the `user_id` in the payload determines whose feed the event lands in.
+
+**Wiring a Claude Code hook**: in your project, add a Stop hook in `.claude/settings.json` that posts to the endpoint. Sketch:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -X POST https://bash-os.vercel.app/api/agent-events -H \"Authorization: Bearer $AGENT_EVENTS_TOKEN\" -H \"Content-Type: application/json\" -d '{\"user_id\":\"<your-uuid>\",\"source\":\"claude-code\",\"project\":\"<project-name>\",\"action\":\"session ended\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Bash OS itself writes to the same table from the morning cron (one "morning sync" event per user, with per-source counts in the payload) and `/api/chat` (one "message" event per user turn, target = leading 120 chars of the prompt).
 
 ## Task decomposition ("Break it down")
 
@@ -149,21 +210,20 @@ See `docs/ARCHITECTURE.md` → "Task decomposition" for the schema, classificati
 
 ## Scheduled jobs
 
-`vercel.json` declares one cron:
+`vercel.json` declares two crons:
 
 ```json
-{ "path": "/api/cron/daily-brief", "schedule": "30 5 * * *" }
+[
+  { "path": "/api/cron/daily-brief", "schedule": "30 5 * * *" },
+  { "path": "/api/cron/unsnooze",    "schedule": "5 20 * * *" }
+]
 ```
 
-That's `05:30 UTC` = **09:30 Dubai (UTC+4)**. The endpoint:
+**Morning sync** (05:30 UTC = 09:30 Dubai). For each user with at least one connected Google account, syncs Gmail + Calendar in parallel and writes a "morning sync" row to `public.agent_events`. R3.5 stopped generating an LLM brief — the brief panel reads current state every page render. The endpoint verifies the `Authorization: Bearer <CRON_SECRET>` header (401 otherwise).
 
-1. Verifies the `Authorization: Bearer <CRON_SECRET>` header (returns 401 if missing/wrong).
-2. Uses the service-role client to list all users with at least one connected Google account.
-3. For each user, syncs Gmail + Calendar in parallel, then generates the brief via `gemini-3-flash-preview`.
-4. Upserts the brief into `public.briefs` on `(user_id, brief_date)` — same-day re-runs replace, don't stack. `brief_date` is the current Dubai-local date.
-5. Calls `revalidatePath('/board')` so the next page render reflects the new state.
+**Nightly unsnooze** (20:05 UTC = 00:05 Dubai). Clears expired `snoozed_until` on `tasks` and `pending_emails`. Same `CRON_SECRET` bearer.
 
-To verify the cron is firing in production: trigger it manually with the same auth header — `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. A 200 with a `{ok:true, userCount, summaries:[…]}` body means the full pipeline ran.
+Manual invocation: `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. Returns `{ok:true, userCount, summaries:[…]}` on success.
 
 ## Deploying to Vercel
 
@@ -176,4 +236,4 @@ Vercel Server Actions and Route Handlers read env vars at runtime — adding or 
 
 ## Round status
 
-R1, R2, R2.5, and R3 (both R3a and R3b) are complete. See `docs/ROUNDS.md` for the full round-by-round breakdown and the R4+ plan.
+R1, R2, R2.5, R3 (both R3a and R3b), and R3.5 (UX redesign + custom columns + owner + command bar + agent activity + email triage) are complete. A small R3.5c follow-up holds the trimmed items (board filter/sort, recurring tasks UI, right-panel chat history). Next strategic round is R4 — autonomous Claude-owned tasks. See `docs/ROUNDS.md` for the round-by-round breakdown.

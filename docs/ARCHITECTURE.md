@@ -57,28 +57,133 @@ The 60-second leeway avoids a race where a token "looked valid" at the start of 
 
 ---
 
-## Status CHECK constraint
+## Custom columns + owner model (R3.5)
 
-The 7 status values are CHECK-constrained at the DB and mirrored as a TypeScript const in `src/lib/supabase/types.ts`. They must stay in sync.
-
-**Exact current values (case + punctuation matter):**
+The 7-value `tasks.status` CHECK that R1 baked in is gone. Replaced by:
 
 ```
-things to think about
-on the menu
-todays plate
-Bash work
-Claude work
-Boss Check
-DIgested.
+public.columns (
+  id           uuid pk,
+  user_id      uuid references auth.users(id) on delete cascade,
+  name         text not null,
+  position     int not null,
+  icon         text,            -- Tabler icon name, e.g. 'ti-inbox'
+  accent_color text,            -- 6-char hex, e.g. '#5e8aff'
+  is_default   bool not null default false,
+  unique (user_id, position)   -- DEFERRABLE for batch reorders
+  unique (user_id, name)
+)
+
+public.tasks.column_id uuid not null references columns(id) on delete restrict
+public.tasks.owner     text not null default 'bash' check (owner in ('bash','claude'))
+public.tasks.needs_review bool not null default false
+public.tasks.tags      text[] not null default '{}'
+public.tasks.snoozed_until timestamptz
 ```
 
-Changing this set requires:
-1. A migration that ALTER-TABLEs the CHECK constraint.
-2. Updating `TASK_STATUSES` in `src/lib/supabase/types.ts`.
-3. Any tool / agent / UI that hard-codes a status (e.g. `INTAKE_STATUS` in `gmail-sync.ts`, `ASSIGNED_STATUS` in `jira-sync.ts`, the chat agent's "things to think about" default).
+**Why columns are user-managed.** R1's seven statuses encoded an opinion about Bashir's workflow that wasn't durable (he never used `on the menu`, `Claude work` was aspirational, `DIgested.` had a typo). Lifting to a table lets him rename, recolor, add, delete without a migration each time. The five starter columns (Inbox / Today / Active / Review / Done) are seeded per user at sign-up.
 
-Renaming a status is destructive — existing rows with the old value will violate the new constraint. The migration must `UPDATE tasks SET status = '<new>' WHERE status = '<old>'` before swapping the constraint.
+**Why owner is its own field.** R1 split Bash-and-Claude work across two columns. R3.5 collapsed both into a single Active column with `owner ∈ {bash, claude}` per task. The card shows the owner via an icon + a 5% purple background tint for claude-owned cards. Decomposed children map: "Bash work" → Active+bash, "Claude work" → Active+claude, "Boss Check" → Review+claude+needs_review=true.
+
+**Migration shape.** Three migrations applied 2026-05-19, in order:
+
+1. `20260519040000_r3_5_columns_and_owner.sql` — additive. New tables (`columns`, `task_events`, `recurrences`, `agent_events`, `pending_emails`), new task columns (`column_id` nullable, `owner`, `needs_review`, `tags`, `snoozed_until`). Old `tasks.status` keeps working.
+2. `20260519050000_r3_5_seed_columns_and_migrate_tasks.sql` — seeds the 5 starter columns for every user with at least one task row, back-fills `column_id` + `owner` + `needs_review` based on legacy status. Verifies zero rows have null `column_id` via a DO block.
+3. `20260519060000_r3_5_drop_status_column.sql` — destructive. Drops `tasks.status`, drops the old `tasks_user_status_position_idx`, locks `column_id` to NOT NULL.
+
+**No hardcoded column names in app logic.** App paths that need a "well-known" column (gmail sync → Inbox, jira sync → Active) resolve via `resolveColumnId(supabase, userId, name)` in `src/lib/board/columns.ts`. Falls back to the user's lowest-position column if the requested name doesn't exist (covers rename / delete).
+
+**R4 hookpoint.** R4 wants to scan for `owner='claude'` tasks, execute them, and move into Review with `needs_review=true`. That's now a single index lookup (`idx_tasks_owner`) plus a column-id-by-name resolve.
+
+---
+
+## Brief panel architecture (R3.5)
+
+The brief panel is a **deterministic** server action that reads current DB state and returns a `BriefState` shape. No LLM call. Lives at `src/app/board/brief-state.ts → getBriefState()`.
+
+**Attention bars** are rendered in priority order; only those whose trigger fires are included:
+
+| Kind | Trigger | Treatment | Click target |
+|---|---|---|---|
+| `calendar-imminent` | calendar-source task with `due_date BETWEEN now AND now+15min` | red | (toast — future: scroll timeline to that event) |
+| `tasks-overdue` | active task (non-Done) with `due_date < now` | red | (toast — future: open overdue list) |
+| `emails-urgent` | active board task with `source='gmail'` AND `importance >= 9` | red | (toast — future: filter board) |
+| `needs-review` | active task with `needs_review = true` | amber | dispatches `bash-os:filter-column` CustomEvent with the Review column id |
+| `emails-triage` | pending_emails row count > 0 | amber | dispatches `bash-os:open-triage` CustomEvent → opens `TriageModal` |
+| `items-unsnoozed` | task with `snoozed_until` in the last 24h | blue | (toast) |
+
+**Day update card** (always rendered): next calendar event with countdown, then "N on plate · M urgent · K in inbox" stats. Counts are computed by filtering the snapshot (no extra queries).
+
+**Why deterministic.** R2 generated the brief via Gemini. Two problems: (1) every cron run cost a model call to summarize state the user could read at a glance from the board, (2) the LLM occasionally invented context that wasn't there. R3.5's panel can't hallucinate — every bar's count comes from a literal SQL filter. `public.briefs` stays in place for a possible future hybrid mode (an LLM-generated headline overlaid on the deterministic panel) but the cron no longer writes to it.
+
+**Snoozed items.** The state query filters `tasks.snoozed_until` and `pending_emails.snoozed_until` with `is.null OR <= now`, so a snoozed item is invisible to the panel until its time comes.
+
+---
+
+## Command bar pattern (R3.5)
+
+Chat moved out of the right-side drawer (`ChatLauncher.tsx` deleted) and into a persistent 40px bar at the bottom of the homepage. ⌘K (Ctrl+K on non-Mac) focuses the input from anywhere; Escape dismisses the response popover.
+
+**Short-circuit prefixes.** Input starting with `task:`, `add:`, `capture:`, or `todo:` skips the LLM entirely. The rest of the line goes straight to `createTask()` with `column_id` resolved to Inbox and `owner='bash'`. Toast confirms the capture. This makes "quick capture" zero-token.
+
+**Other input → /api/chat.** The backend hasn't changed since R2.5 — it still loads history from `chat_messages`, builds the per-turn context, runs `ToolLoopAgent` with six tools, streams via `useChat` + `DefaultChatTransport`. What changed: the request body only ships the latest user message (history is server-side), and the streamed response renders in a popover above the bar instead of a drawer.
+
+**Popover semantics.** Slides up above the bar on submit, shows the last 8 turns, supports Stop + Clear. Click-outside or Escape closes it; the messages survive (they're persisted server-side anyway).
+
+**Drawer is gone.** `BriefDrawer.tsx`, `ChatLauncher.tsx`, and `SyncButton.tsx` were all deleted in R3.5. The brief lives in the left panel; sync runs from the morning cron (no manual button — Bashir can hit `/api/cron/daily-brief` with the bearer secret if he ever needs to force a re-sync).
+
+---
+
+## Agent activity ingestion (R3.5)
+
+External agents (a Claude Code hook, a Cowork session, anything that wants to surface "I'm working on X right now") can POST to `/api/agent-events` to write a row into `public.agent_events`. The right-panel feed renders the latest 20 events, refreshing every 30s.
+
+**Endpoint shape**:
+
+```
+POST /api/agent-events
+Authorization: Bearer $AGENT_EVENTS_TOKEN
+Content-Type: application/json
+{
+  "user_id": "<uuid>",
+  "source":  "claude-code",
+  "project": "bash-os",                  // optional
+  "action":  "editing",
+  "target":  "src/queries.ts",           // optional
+  "payload": { "line": 42 }              // optional, arbitrary JSON
+}
+```
+
+Returns `{ ok: true, id, created_at }` on success, 401 on missing/bad bearer, 400 on schema violation.
+
+**Auth model.** The token is a project-wide shared secret in `AGENT_EVENTS_TOKEN`. Insert goes through the admin client (RLS bypassed) because the caller may be a worker with no Supabase session. The `user_id` in the payload determines whose feed it lands in — there's no per-token user binding yet (single-user project), but a future multi-user version would scope tokens by user.
+
+**Internal events.** Bash OS itself writes to the same table:
+
+- `/api/cron/daily-brief` — one event per user per run, source `cron`, action `morning sync`, payload with per-source counts.
+- `/api/chat` — one event per user turn, source `chat`, action `message`, target = first 120 chars of the prompt.
+
+Future: gmail/calendar/jira sync paths could each write a per-account event. Not in R3.5 — kept the noise down.
+
+**R4 hookpoint.** When R4 wires autonomous Claude-owned execution, each agent step (start, tool call, completion) becomes an `agent_events` row tagged `source='r4-worker'`, project = the originating task, action describing the step. The feed already renders that shape.
+
+---
+
+## Email triage flow (R3.5)
+
+R3a admitted any email with `importance >= 4` to the board. R3.5 splits the admit band into two:
+
+| Score | Routing | UI |
+|---|---|---|
+| 8-10 | Auto-task to Inbox column with `source='gmail'`, `importance` set | Renders on board immediately. |
+| 4-7 | Insert into `public.pending_emails` (subject, sender, snippet, score) | Triage queue. Brief panel shows an amber "N emails to review" bar; click opens `TriageModal`. |
+| 0-3 | Drop silently | Visible only with `/?show_filtered=1` for rubric debugging. |
+
+**Triage modal**: keyboard-driven (`↑↓` navigate, `T` make task, `D` dismiss, `S` snooze 24h, `O` open in Gmail). "Make task" promotes the pending row into a board task in Inbox (records a `task_events` 'created' row tagged `source='triage'`) and deletes the pending row.
+
+**Snooze semantics**. Both `tasks.snoozed_until` and `pending_emails.snoozed_until` mean "treat this row as invisible until that timestamp passes". The brief panel's state query honors it (`is.null OR <= now`). A nightly `/api/cron/unsnooze` at 20:05 UTC (00:05 Dubai) clears expired snoozes — items literally reappear at the start of the user's local day.
+
+**Why 4-7 isn't just "auto-task with a flag".** Phase 9 needed a separation between "this email definitely deserves your attention" (8-10) and "this might be useful, you decide" (4-7). Surfacing the 4-7 band as an attention bar with a single decision point is faster than triaging each one as a board task — Bashir reads the snippet, hits T or D, moves on.
 
 ---
 

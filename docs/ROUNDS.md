@@ -95,11 +95,46 @@ Split into two sub-rounds shipped back-to-back on 2026-05-19.
 
 ---
 
-## R4 — Autonomous Claude-work column — 🔮 Sketched
+## R3.5 — UX redesign + custom columns + owner — ✅ Complete (2026-05-19)
 
-- *Why it matters:* The `Claude work` column exists for a reason. Right now Bashir manually moves tasks there but nothing actually happens; the column is aspirational. R4 makes the column real.
-- *Rough shape:* A Vercel Cron job (separate from the morning brief) scans `Claude work` every N minutes for tasks ready to execute. For each, it invokes a worker agent with the same `ToolLoopAgent` tools the chat already has, plus task-specific tools (web fetch, file write, draft-email, draft-comment). The agent runs autonomously, produces an output, and moves the task into `Boss Check` with the output attached to `description` for Bashir to review and either approve or kick back.
-- Key questions to resolve before R4 can start: how to bound autonomous execution (token budget, time budget, tool-call count); how to handle agent failures (retry vs surface as error); how to render the agent's output in the `Boss Check` card (markdown? link out? attachment?).
+A design + refactor pass between R3 and R4. Reshapes the surface, the schema, and the agent interaction model. Ten deliverables, pre-decided scope, no feature creep.
+
+### Schema
+
+- **`tasks.status` is gone.** Replaced by a user-managed `public.columns` table (`id`, `user_id`, `name`, `position`, `icon`, `accent_color`, `is_default`) and `tasks.column_id uuid not null references columns(id)`. Five starter columns are seeded per user: Inbox / Today / Active / Review / Done. Migrations: `20260519040000_r3_5_columns_and_owner.sql` (additive — new tables, new task columns), `20260519050000_r3_5_seed_columns_and_migrate_tasks.sql` (seed + back-fill), `20260519060000_r3_5_drop_status_column.sql` (destructive drop).
+- **First-class owner.** `tasks.owner` is `'bash' | 'claude'`. The "Claude work" / "Bash work" split that R1 baked into `status` is gone; both kinds of work live in the Active column and the owner field disambiguates. Migration mapping: 'Bash work' → Active+bash, 'Claude work' → Active+claude, 'Boss Check' → Review+claude+needs_review=true.
+- **New supporting tables**: `task_events` (timeline + audit), `recurrences` (recurring task templates, R3.5 schema only — UI ships in R3.5c), `agent_events` (external + internal activity feed), `pending_emails` (score-4-to-7 triage queue).
+- **New task fields**: `owner`, `needs_review`, `tags text[]`, `snoozed_until`. `pending_emails` also has `snoozed_until`.
+
+### Surfaces
+
+- **Homepage at `/`.** `/board` is now a redirect. The three-panel layout: left = brief + timeline (22% width), middle = board (56%), right = agent activity + context (22%). 40px header on top, 40px command bar on bottom.
+- **Brief panel is deterministic.** No LLM call. Attention bars (calendar imminent / overdue tasks / urgent emails / needs review / emails to triage / unsnoozed items) fire only when their triggers fire. Day-update card shows next calendar event + "N on plate · M urgent · K in inbox" stats. Replaces the R2.5 `BriefDrawer`. The `public.briefs` table stays in place but the cron no longer writes to it.
+- **Timeline panel.** Vertical time-axis from 9:00 to 21:00 (auto-extends). Renders calendar events + task events (created / moved / completed / deleted) from `public.task_events`.
+- **Custom columns.** "+ add column" inline form at the end of the row, column header "..." menu for rename / accent color / delete (delete prompts for a destination column when tasks would be orphaned). Drag-and-drop reorders columns. Cards have an owner icon (Bashir = user, Claude = bolt, plus 5% purple bg tint on claude-owned cards) and up to 2 tag chips.
+- **Command bar.** Persistent at the bottom, 40px tall, ⌘K focus. Prefixes `task:` / `add:` / `capture:` / `todo:` short-circuit to a direct Inbox insert (no LLM). Other input streams chat through `/api/chat` into a popover above the bar. Drawer chat is deleted.
+- **Right-panel agent activity feed.** Reads `public.agent_events`, refreshes every 30s. Click a row to expand its payload. External callers POST to `/api/agent-events` with `Authorization: Bearer $AGENT_EVENTS_TOKEN`.
+- **Email triage modal.** R3a's binary admit/drop becomes a 3-tier route: score 8-10 auto-task to Inbox (existing path, narrower band), score 4-7 → `public.pending_emails`, score < 4 drops. TriageModal lists pending rows with Make-task / Dismiss / Snooze / Open-in-Gmail actions (arrow keys + T/D/S/O hotkeys).
+- **Snooze + unsnooze.** `tasks.snoozed_until` and `pending_emails.snoozed_until` hide rows from views. Nightly cron `/api/cron/unsnooze` at 20:05 UTC (00:05 Dubai) clears expired snoozes.
+- **Visual language.** Dark-only. Background `#0a0a0c`, panel `#141418`, card `#1a1a1f`. Accent `#5e8aff` (active/selected, not urgency). Urgent `#e24b4a`, amber `#f5a23a`, success `#5fc96b`. Owner tints: bash gray, claude muted purple. Tight padding (8px panel / 6px card), 11-13px type, two font weights. No glow, no gradients, no glass.
+
+### Deferred to R3.5c (small follow-up round)
+
+The original R3.5 spec listed three smaller items that didn't ship in this pass and roll into R3.5c:
+
+- **Filter & sort controls** in the board header — source / owner / tag dropdowns plus an in-column sort selector. Filter state persisted to localStorage per user.
+- **Recurring tasks UI.** Schema for `public.recurrences` shipped; the TaskDialog repeats picker and the hourly `/api/cron/recurrences` route did not.
+- **Right-panel chat history** — a "show chat history" affordance in the context section that loads recent `chat_messages`.
+
+Nothing about R3.5 blocks these; they were trimmed for scope.
+
+---
+
+## R4 — Autonomous Claude-owned tasks — 🔮 Sketched
+
+- *Why it matters:* R3.5 made `owner='claude'` a first-class field but nothing happens automatically when a task is assigned to Claude. R4 makes Claude-owned tasks actually execute on their own.
+- *Rough shape:* A Vercel Cron job (separate from the morning sync) scans for tasks with `owner='claude'` ready to execute. For each, it invokes a worker agent with the same `ToolLoopAgent` tools the chat already has, plus task-specific tools (web fetch, file write, draft-email, draft-comment). The agent runs autonomously, produces an output, and moves the task into the Review column (sets `needs_review=true`) with the output attached to `description` for Bashir to approve or kick back.
+- Key questions to resolve before R4 can start: how to bound autonomous execution (token budget, time budget, tool-call count); how to handle agent failures (retry vs surface as error); how to render the agent's output in the Review card (markdown? link out? attachment?).
 
 ---
 

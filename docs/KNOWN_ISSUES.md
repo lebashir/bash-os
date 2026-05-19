@@ -34,10 +34,11 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 - Bash OS *replaces* ClickUp for Bashir's personal use. Don't build a connector for the tool we're moving off of.
 - This is not a "todo later" — it's a "never". If a future round prompt says "let's add ClickUp", stop and re-read this entry.
 
-## 6. Gmail importance threshold is hard-coded — RESOLVED in R3a
+## 6. Gmail importance threshold is hard-coded — RESOLVED in R3a, refined in R3.5
 
-- Resolved by R3a (2026-05-19). Gmail sync now scores each unread message via Gemini 3 Flash and drops anything below `IMPORTANCE_THRESHOLD = 4`. See `docs/ARCHITECTURE.md` → "Email importance scoring".
-- Tunable in code only — no UI knob yet. If the rubric over- or under-filters, edit the threshold in `src/lib/board/email-importance.ts` and/or the system prompt in the same file. `/board?show_filtered=1` re-runs sync without the filter for spot-checking.
+- R3a (2026-05-19) added per-message scoring with `IMPORTANCE_THRESHOLD = 4` for admit/drop.
+- R3.5 (2026-05-19) split the admit band: 8-10 auto-task to Inbox, 4-7 → triage queue (`public.pending_emails`) surfaced as a brief attention bar + `TriageModal`. See `docs/ARCHITECTURE.md` → "Email triage flow".
+- The `show_filtered=1` query param still re-runs sync without the floor for rubric debugging.
 
 ## 7. No connector rate-limit handling
 
@@ -53,3 +54,13 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 
 - Deliberate skip from R1 carried through R2. Single user, no team, ship-first.
 - Not a debt entry — it's a design choice. Don't add Vitest/Playwright/Husky without an explicit ask.
+
+## 10. Recurring tasks schema is live but the UI / cron isn't — R3.5c
+
+- `public.recurrences` was created in R3.5 phase 1 but neither the TaskDialog `RepeatsPicker` nor the hourly `/api/cron/recurrences` route shipped in R3.5. Listed in `docs/ROUNDS.md` under "Deferred to R3.5c".
+- Inserting a row directly into `public.recurrences` does nothing today — without the cron firing, `next_fire_at` is decorative. Don't rely on it.
+
+## 11. Board filter / sort and chat-history right-panel — R3.5c
+
+- Both listed in the original R3.5 spec; trimmed to ship R3.5 cleanly. Board renders all tasks unfiltered, in `position` order within each column. Right-panel context section shows a placeholder where the chat-history affordance was supposed to land.
+- Pick up in R3.5c alongside recurring tasks.
