@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { Toaster } from "@/components/ui/sonner";
 import { FlashToaster } from "@/components/board/FlashToaster";
+import { AgentActivityPanel } from "@/components/home/AgentActivityPanel";
 import { BoardPanel } from "@/components/home/BoardPanel";
 import { BriefPanel } from "@/components/home/BriefPanel";
 import { CommandBar } from "@/components/home/CommandBar";
@@ -8,6 +9,7 @@ import { HomeHeader } from "@/components/home/HomeHeader";
 import { HomeShell } from "@/components/home/HomeShell";
 import { TimelinePanel } from "@/components/home/TimelinePanel";
 import { listTasks } from "@/app/board/actions";
+import { listAgentEvents } from "@/app/board/agent-events";
 import { getBriefState } from "@/app/board/brief-state";
 import { listChatUIMessages } from "@/app/board/command-actions";
 import { listColumns } from "@/app/board/column-actions";
@@ -54,6 +56,7 @@ export default async function Home({ searchParams }: HomeProps) {
     columns,
     tasks,
     chatHistory,
+    agentEvents,
     flash,
   ] = await Promise.all([
     listConnectedAccounts(),
@@ -62,6 +65,7 @@ export default async function Home({ searchParams }: HomeProps) {
     listColumns(),
     listTasks(),
     listChatUIMessages(),
+    listAgentEvents(),
     searchParams,
   ]);
   const pills = computeConnectorPills(accounts);
@@ -79,12 +83,7 @@ export default async function Home({ searchParams }: HomeProps) {
       brief={<BriefPanel state={briefState} />}
       timeline={<TimelinePanel events={timelineEvents} />}
       board={<BoardPanel initialColumns={columns} initialTasks={tasks} />}
-      agentActivity={
-        <>
-          <PanelTitle>agent activity</PanelTitle>
-          <PanelPlaceholder note="agent activity feed lands in phase 8 — external + internal events will stream here." />
-        </>
-      }
+      agentActivity={<AgentActivityPanel initialEvents={agentEvents} />}
       context={
         <>
           <PanelTitle>context</PanelTitle>

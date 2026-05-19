@@ -86,6 +86,23 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Record a feed event per user so the right-panel agent-activity feed
+    // shows the cron actually ran. One event per user keeps the feed legible
+    // (vs one event per source per user).
+    await admin.from("agent_events").insert({
+      user_id: userId,
+      source: "cron",
+      action: "morning sync",
+      target: null,
+      payload: {
+        gmailCreated: summary.gmailCreated,
+        gmailSkipped: summary.gmailSkipped,
+        calendarCreated: summary.calendarCreated,
+        calendarSkipped: summary.calendarSkipped,
+        syncErrors: summary.syncErrors,
+      },
+    });
+
     summaries.push(summary);
   }
 

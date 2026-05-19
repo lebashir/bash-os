@@ -39,6 +39,22 @@ export async function POST(req: Request): Promise<Response> {
   // streaming failure mid-flight.
   await saveChatMessage(supabase, user.id, "user", userText);
 
+  // Record the chat turn in the agent activity feed. Best-effort — never
+  // block the LLM call on a telemetry write.
+  await supabase
+    .from("agent_events")
+    .insert({
+      user_id: user.id,
+      source: "chat",
+      action: "message",
+      target: userText.slice(0, 120),
+      payload: {},
+    })
+    .then(({ error }) => {
+      if (error)
+        console.warn("[agent_events] chat insert failed:", error.message);
+    });
+
   const messages = await buildAgentMessages(supabase, user.id, userText);
   const agent = buildAgent(supabase, user.id);
   const result = await agent.stream({ messages });
