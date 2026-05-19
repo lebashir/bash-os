@@ -4,31 +4,37 @@ import { generateObject } from "ai";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
+import { loadColumnLookup } from "@/lib/board/columns";
 import { createClient } from "@/lib/supabase/server";
 import {
   TASK_PRIORITIES,
   type Task,
-  type TaskPriority,
+  type TaskOwner,
 } from "@/lib/supabase/types";
 
-// Children are routed into one of these three columns. Other statuses
-// (intake / staging / done) aren't meaningful destinations for a brand-new
-// decomposed sub-task.
-const CHILD_STATUSES = ["Bash work", "Claude work", "Boss Check"] as const;
-export type ChildStatus = (typeof CHILD_STATUSES)[number];
+// R3.5 collapsed Bash work + Claude work into a single Active column with
+// per-task owner. The LLM still classifies into the three semantic buckets
+// below because those map naturally to (column, owner, needs_review) tuples
+// at insert time:
+//
+//   "Bash work"   -> Active,  owner='bash'
+//   "Claude work" -> Active,  owner='claude'
+//   "Boss Check"  -> Review,  owner='claude', needs_review=true
+const CHILD_KINDS = ["Bash work", "Claude work", "Boss Check"] as const;
+export type ChildKind = (typeof CHILD_KINDS)[number];
 
 const MAX_CHILDREN = 5;
 const MIN_CHILDREN = 2;
 
-const DECOMPOSE_SYSTEM_PROMPT = `You break down a vague task into 2-5 atomic child tasks. Each child must be doable in a single sitting and routed into one of three columns based on who should do it:
+const DECOMPOSE_SYSTEM_PROMPT = `You break down a vague task into 2-5 atomic child tasks. Each child must be doable in a single sitting and routed into one of three kinds based on who should do it:
 
-- "Bash work" — relationships, judgment calls, irreversible actions. Meetings to hold, decisions to make, external messages to send, things that require Bashir's personal context or authority.
-- "Claude work" — mechanical, low-judgment, reversible. Research, drafting, formatting, cross-referencing, gathering background info. The kind of thing an LLM agent can do unattended and produce a useful output.
-- "Boss Check" — Claude drafts something, Bashir approves before it goes out. Procedure responses, status updates, draft replies, anything where Bashir needs to review LLM output before it ships externally.
+- "Bash work" — relationships, judgment calls, irreversible actions. Meetings to hold, decisions to make, external messages to send, things that require Bashir's personal context or authority. Owned by Bashir.
+- "Claude work" — mechanical, low-judgment, reversible. Research, drafting, formatting, cross-referencing, gathering background info. The kind of thing an LLM agent can do unattended and produce a useful output. Owned by Claude.
+- "Boss Check" — Claude drafts something, Bashir approves before it goes out. Procedure responses, status updates, draft replies, anything where Bashir needs to review LLM output before it ships externally. Owned by Claude, flagged for review.
 
 Rules for the children:
 - 2-5 children. No more, no less. If a task is too small to need 2 children, don't decompose it — pick the smallest sensible split.
-- Each child has a concrete title (under 80 chars), a short description (1-2 sentences), a status (one of the three above), and a one-sentence rationale explaining why it lives in that column.
+- Each child has a concrete title (under 80 chars), a short description (1-2 sentences), a kind (one of the three above), and a one-sentence rationale explaining why it falls in that bucket.
 - Children are atomic and roughly sequential. Order matters — the first child should be the first thing to do.
 - Don't restate the parent. Don't echo "Step 1:", "Step 2:" — the children already form an ordered list.
 - Don't propose meta-tasks like "plan the work" or "review the plan". Propose actual work.
@@ -41,7 +47,7 @@ const decompositionSchema = z.object({
       z.object({
         title: z.string().trim().min(1).max(200),
         description: z.string().trim().min(1).max(1000),
-        status: z.enum(CHILD_STATUSES),
+        kind: z.enum(CHILD_KINDS),
         rationale: z.string().trim().min(1).max(300),
       }),
     )
@@ -72,7 +78,7 @@ export async function decomposeTask(taskId: string): Promise<DecomposeResult> {
 
   const { data: parent, error } = await supabase
     .from("tasks")
-    .select("id, title, description, status, priority, parent_id")
+    .select("id, title, description, column_id, priority, parent_id")
     .eq("id", taskId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -83,11 +89,19 @@ export async function decomposeTask(taskId: string): Promise<DecomposeResult> {
     throw new Error("This task already has a parent — children can't themselves be decomposed.");
   }
 
+  const lookup = await loadColumnLookup(supabase, user.id);
+  const columnName = lookup.byId.get(parent.column_id as string) ?? "(unknown column)";
+
   const { object } = await generateObject({
     model: google(CHAT_MODEL_ID),
     schema: decompositionSchema,
     system: DECOMPOSE_SYSTEM_PROMPT,
-    prompt: renderParent(parent as ParentRow),
+    prompt: renderParent({
+      title: parent.title as string,
+      columnName,
+      priority: parent.priority as string | null,
+      description: parent.description as string | null,
+    }),
     temperature: 0.4,
     maxOutputTokens: 1500,
     providerOptions: {
@@ -108,7 +122,7 @@ const createChildrenSchema = z.object({
       z.object({
         title: z.string().trim().min(1).max(500),
         description: z.string().trim().max(10_000),
-        status: z.enum(CHILD_STATUSES),
+        kind: z.enum(CHILD_KINDS),
         priority: z
           .enum(TASK_PRIORITIES)
           .nullish()
@@ -120,6 +134,12 @@ const createChildrenSchema = z.object({
 });
 
 export type CreateChildrenInput = z.input<typeof createChildrenSchema>;
+
+interface KindMapping {
+  columnId: string;
+  owner: TaskOwner;
+  needsReview: boolean;
+}
 
 export async function createDecomposedChildren(
   input: CreateChildrenInput,
@@ -141,38 +161,64 @@ export async function createDecomposedChildren(
     throw new Error("Parent task not found");
   }
 
-  // source_id prefix per ARCHITECTURE.md → "Task decomposition". When the
-  // parent came from a connector (Jira issue PMP-65, Gmail message id, etc.)
-  // the children get something like "PMP-65/research-pricing". When the
-  // parent was manually created (source_id null) the prefix falls back to
-  // the parent's UUID so the relationship is still visible.
-  const sourceIdPrefix = (parent.source_id as string | null) ?? (parent.id as string);
+  const lookup = await loadColumnLookup(supabase, user.id);
+  if (!lookup.activeId || !lookup.reviewId) {
+    throw new Error(
+      "Decomposition requires Active and Review columns — schema not seeded?",
+    );
+  }
+
+  const kindToMapping: Record<ChildKind, KindMapping> = {
+    "Bash work": {
+      columnId: lookup.activeId,
+      owner: "bash",
+      needsReview: false,
+    },
+    "Claude work": {
+      columnId: lookup.activeId,
+      owner: "claude",
+      needsReview: false,
+    },
+    "Boss Check": {
+      columnId: lookup.reviewId,
+      owner: "claude",
+      needsReview: true,
+    },
+  };
+
+  const sourceIdPrefix =
+    (parent.source_id as string | null) ?? (parent.id as string);
 
   // Compute next positions per destination column in one pass.
-  const distinctStatuses = Array.from(new Set(parsed.children.map((c) => c.status)));
-  const nextPositionByStatus = new Map<string, number>();
-  for (const status of distinctStatuses) {
+  const distinctColumns = Array.from(
+    new Set(parsed.children.map((c) => kindToMapping[c.kind].columnId)),
+  );
+  const nextPositionByColumn = new Map<string, number>();
+  for (const columnId of distinctColumns) {
     const { data: maxPos } = await supabase
       .from("tasks")
       .select("position")
       .eq("user_id", user.id)
-      .eq("status", status)
+      .eq("column_id", columnId)
       .order("position", { ascending: false })
       .limit(1)
       .maybeSingle();
-    nextPositionByStatus.set(status, (maxPos?.position ?? -1) + 1);
+    nextPositionByColumn.set(columnId, (maxPos?.position ?? -1) + 1);
   }
 
   const rows = parsed.children.map((child) => {
     const slug = slugify(child.title);
     const sourceId = `${sourceIdPrefix}/${slug}`;
-    const position = nextPositionByStatus.get(child.status) ?? 0;
-    nextPositionByStatus.set(child.status, position + 1);
+    const mapping = kindToMapping[child.kind];
+    const position = nextPositionByColumn.get(mapping.columnId) ?? 0;
+    nextPositionByColumn.set(mapping.columnId, position + 1);
     return {
       user_id: user.id,
       title: child.title,
       description: child.description || null,
-      status: child.status,
+      column_id: mapping.columnId,
+      owner: mapping.owner,
+      needs_review: mapping.needsReview,
       priority: child.priority,
       source: "manual" as const,
       source_id: sourceId,
@@ -187,6 +233,18 @@ export async function createDecomposedChildren(
     .select("*");
 
   if (error) throw new Error(`Failed to create children: ${error.message}`);
+
+  // Bulk task_events insert for the new children.
+  if (data && data.length > 0) {
+    await supabase.from("task_events").insert(
+      data.map((row) => ({
+        user_id: user.id,
+        task_id: row.id,
+        event_type: "created",
+        metadata: { source: "decompose", column_id: row.column_id },
+      })),
+    );
+  }
 
   revalidatePath("/");
   return (data ?? []) as Task[];
@@ -207,15 +265,17 @@ export async function getParentSummary(
   return { id: data.id as string, title: data.title as string };
 }
 
-type ParentRow = Pick<
-  Task,
-  "id" | "title" | "description" | "status" | "priority" | "parent_id"
->;
+interface ParentSnapshot {
+  title: string;
+  columnName: string;
+  priority: string | null;
+  description: string | null;
+}
 
-function renderParent(parent: ParentRow): string {
+function renderParent(parent: ParentSnapshot): string {
   const lines = [
     `Parent task: ${parent.title}`,
-    `Current column: ${parent.status}`,
+    `Current column: ${parent.columnName}`,
   ];
   if (parent.priority) {
     lines.push(`Priority: ${parent.priority}`);

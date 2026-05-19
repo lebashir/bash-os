@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getGoogleAccessToken } from "@/lib/google/token";
-import type { TaskStatus } from "@/lib/supabase/types";
+import { resolveColumnId } from "./columns";
 import {
   IMPORTANCE_THRESHOLD,
   scoreEmailImportance,
@@ -10,7 +10,6 @@ import {
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GMAIL_QUERY = "is:unread in:inbox";
 const SYNC_LIMIT = 20;
-const INTAKE_STATUS: TaskStatus = "things to think about";
 
 export type SyncGmailAccountResult = {
   accountEmail: string;
@@ -107,6 +106,10 @@ async function syncOneAccount(
   accountEmail: string,
   options: SyncGmailOptions,
 ): Promise<SyncGmailAccountResult> {
+  const inboxColumnId = await resolveColumnId(supabase, userId, "Inbox");
+  if (!inboxColumnId) {
+    throw new Error("No Inbox column found for user — schema not seeded?");
+  }
   const accessToken = await getGoogleAccessToken(supabase, userId, accountEmail);
 
   const listUrl = new URL(`${GMAIL_BASE}/messages`);
@@ -151,7 +154,7 @@ async function syncOneAccount(
     .from("tasks")
     .select("position")
     .eq("user_id", userId)
-    .eq("status", INTAKE_STATUS)
+    .eq("column_id", inboxColumnId)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -163,7 +166,8 @@ async function syncOneAccount(
     user_id: string;
     title: string;
     description: string;
-    status: TaskStatus;
+    column_id: string;
+    owner: "bash";
     source: "gmail";
     source_account: string;
     source_id: string;
@@ -195,7 +199,8 @@ async function syncOneAccount(
       user_id: userId,
       title,
       description: `From: ${from}\n\n${snippet}`,
-      status: INTAKE_STATUS,
+      column_id: inboxColumnId,
+      owner: "bash",
       source: "gmail",
       source_account: accountEmail,
       source_id: msg.id,

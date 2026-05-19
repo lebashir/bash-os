@@ -3,9 +3,14 @@ import { revalidatePath } from "next/cache";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { syncGmailForUser } from "@/lib/board/gmail-sync";
 import { syncCalendarForUser } from "@/lib/board/calendar-sync";
-import { generateAndStoreBrief } from "@/lib/board/brief";
 
 export const dynamic = "force-dynamic";
+
+// R3.5 made the brief panel deterministic. The morning cron used to call
+// generateAndStoreBrief() to write an LLM-generated paragraph into the
+// briefs table; that's gone now. The brief panel reads current state
+// every page render. public.briefs stays in place for a future hybrid
+// mode (optional headline) but the cron no longer writes to it.
 
 type UserBriefSummary = {
   userId: string;
@@ -14,9 +19,6 @@ type UserBriefSummary = {
   calendarCreated: number;
   calendarSkipped: number;
   syncErrors: string[];
-  briefId?: string;
-  briefDate?: string;
-  briefError?: string;
 };
 
 export async function GET(request: NextRequest) {
@@ -84,21 +86,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    try {
-      const { briefId, briefDate } = await generateAndStoreBrief(admin, userId);
-      summary.briefId = briefId;
-      summary.briefDate = briefDate;
-    } catch (error) {
-      summary.briefError =
-        error instanceof Error ? error.message : "Unknown brief error";
-    }
-
     summaries.push(summary);
   }
 
-  // Invalidate the cached /board render so a user opening the page in the
-  // morning sees the freshly-synced items + the newest brief in the drawer
-  // without a hard refresh.
+  // Invalidate the cached homepage so the brief / timeline / board panels
+  // reflect the freshly-synced items on the next page render.
   revalidatePath("/");
 
   return NextResponse.json({

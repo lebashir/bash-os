@@ -1,10 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getGoogleAccessToken } from "@/lib/google/token";
-import type { TaskStatus } from "@/lib/supabase/types";
+import { resolveColumnId } from "./columns";
 
 const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 const SYNC_LIMIT = 25;
-const INTAKE_STATUS: TaskStatus = "todays plate";
 const HORIZON_HOURS = 24;
 
 export type SyncCalendarAccountResult = {
@@ -92,6 +91,10 @@ async function syncOneAccount(
   userId: string,
   accountEmail: string,
 ): Promise<SyncCalendarAccountResult> {
+  const todayColumnId = await resolveColumnId(supabase, userId, "Today");
+  if (!todayColumnId) {
+    throw new Error("No Today column found for user — schema not seeded?");
+  }
   const accessToken = await getGoogleAccessToken(supabase, userId, accountEmail);
 
   const now = new Date();
@@ -116,7 +119,7 @@ async function syncOneAccount(
     .from("tasks")
     .select("position")
     .eq("user_id", userId)
-    .eq("status", INTAKE_STATUS)
+    .eq("column_id", todayColumnId)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -129,7 +132,8 @@ async function syncOneAccount(
       user_id: userId,
       title: event.summary ?? "(no title)",
       description: renderEventDescription(event),
-      status: INTAKE_STATUS,
+      column_id: todayColumnId,
+      owner: "bash" as const,
       source: "calendar" as const,
       source_account: accountEmail,
       source_id: event.id,

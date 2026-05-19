@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { TaskStatus } from "@/lib/supabase/types";
+import { resolveColumnId } from "./columns";
 
 // Unlike Gmail/Calendar (multi-account OAuth in connector_tokens), Slack is a
 // single-workspace personal token stored in env: paste once, no callback flow.
@@ -8,7 +8,6 @@ const SLACK_BASE = "https://slack.com/api";
 const LOOKBACK_HOURS = 48;
 const HISTORY_LIMIT_PER_DM = 20;
 const DM_FETCH_LIMIT = 50;
-const INTAKE_STATUS: TaskStatus = "things to think about";
 
 export type SyncSlackAccountResult = {
   accountEmail: string;
@@ -115,6 +114,10 @@ async function syncOneWorkspace(
   accountEmail: string,
   selfId: string,
 ): Promise<SyncSlackAccountResult> {
+  const inboxColumnId = await resolveColumnId(supabase, userId, "Inbox");
+  if (!inboxColumnId) {
+    throw new Error("No Inbox column found for user — schema not seeded?");
+  }
   const dms = await slackFetch<ConversationsListResponse>(
     `conversations.list?types=im&limit=${DM_FETCH_LIMIT}&exclude_archived=true`,
     token,
@@ -169,7 +172,7 @@ async function syncOneWorkspace(
     .from("tasks")
     .select("position")
     .eq("user_id", userId)
-    .eq("status", INTAKE_STATUS)
+    .eq("column_id", inboxColumnId)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -190,7 +193,8 @@ async function syncOneWorkspace(
       user_id: userId,
       title: `Slack DM: ${title}`,
       description: `From: ${senderName} in DM\n\n${text}`,
-      status: INTAKE_STATUS,
+      column_id: inboxColumnId,
+      owner: "bash" as const,
       source: "slack" as const,
       source_account: accountEmail,
       source_id: `${p.channelId}:${p.message.ts}`,

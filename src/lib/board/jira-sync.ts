@@ -1,12 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { TaskPriority, TaskStatus } from "@/lib/supabase/types";
+import { resolveColumnId } from "./columns";
+import type { TaskPriority } from "@/lib/supabase/types";
 
 // Same shape rationale as slack-sync: single-site personal-tool, paste a
 // Jira API token + email in env. Multi-site → upgrade to connector_tokens.
 const ASSIGNEE_JQL = "assignee = currentUser() AND statusCategory != Done";
 const FIELDS = ["summary", "status", "priority", "duedate", "issuetype"];
 const SEARCH_LIMIT = 50;
-const ASSIGNED_STATUS: TaskStatus = "Bash work";
 
 export type SyncJiraAccountResult = {
   accountEmail: string;
@@ -86,6 +86,10 @@ async function syncOneSite(
   accountEmail: string,
   auth: string,
 ): Promise<SyncJiraAccountResult> {
+  const activeColumnId = await resolveColumnId(supabase, userId, "Active");
+  if (!activeColumnId) {
+    throw new Error("No Active column found for user — schema not seeded?");
+  }
   // Use the new /search/jql endpoint (POST) which Atlassian's deprecation
   // notice points to from the older GET /search.
   const response = await fetch(`${baseUrl}/rest/api/3/search/jql`, {
@@ -116,7 +120,7 @@ async function syncOneSite(
     .from("tasks")
     .select("position")
     .eq("user_id", userId)
-    .eq("status", ASSIGNED_STATUS)
+    .eq("column_id", activeColumnId)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -140,7 +144,8 @@ async function syncOneSite(
       user_id: userId,
       title: `[${issue.key}] ${summary}`,
       description,
-      status: ASSIGNED_STATUS,
+      column_id: activeColumnId,
+      owner: "bash" as const,
       source: "jira" as const,
       source_account: accountEmail,
       source_id: issue.key,

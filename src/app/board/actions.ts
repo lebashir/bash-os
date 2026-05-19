@@ -2,15 +2,16 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import {
+  TASK_OWNERS,
   TASK_PRIORITIES,
-  TASK_STATUSES,
   type Task,
 } from "@/lib/supabase/types";
 
-const statusSchema = z.enum(TASK_STATUSES);
 const prioritySchema = z.enum(TASK_PRIORITIES);
+const ownerSchema = z.enum(TASK_OWNERS);
 
 const upsertSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(500),
@@ -20,7 +21,8 @@ const upsertSchema = z.object({
     .max(10_000)
     .nullish()
     .transform((v) => (v && v.length > 0 ? v : null)),
-  status: statusSchema,
+  column_id: z.string().uuid(),
+  owner: ownerSchema.default("bash"),
   priority: prioritySchema.nullish().transform((v) => v ?? null),
   due_date: z
     .string()
@@ -32,6 +34,8 @@ const upsertSchema = z.object({
     .max(200)
     .nullish()
     .transform((v) => (v && v.length > 0 ? v : null)),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  needs_review: z.boolean().optional(),
 });
 
 export type TaskFormInput = z.input<typeof upsertSchema>;
@@ -53,7 +57,7 @@ export async function listTasks(): Promise<Task[]> {
     .from("tasks")
     .select("*")
     .eq("user_id", user.id)
-    .order("status", { ascending: true })
+    .order("column_id", { ascending: true })
     .order("position", { ascending: true });
 
   if (error) {
@@ -70,7 +74,7 @@ export async function createTask(input: TaskFormInput): Promise<Task> {
     .from("tasks")
     .select("position")
     .eq("user_id", user.id)
-    .eq("status", parsed.status)
+    .eq("column_id", parsed.column_id)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -90,6 +94,12 @@ export async function createTask(input: TaskFormInput): Promise<Task> {
   if (error) {
     throw new Error(`Create failed: ${error.message}`);
   }
+
+  await recordTaskEvent(supabase, user.id, data.id, "created", {
+    source: data.source,
+    column_id: data.column_id,
+  });
+
   revalidatePath("/");
   return data as Task;
 }
@@ -99,7 +109,13 @@ export async function updateTask(
   input: TaskFormInput,
 ): Promise<Task> {
   const parsed = upsertSchema.parse(input);
-  const { supabase } = await requireUser();
+  const { supabase, user } = await requireUser();
+
+  const { data: prior } = await supabase
+    .from("tasks")
+    .select("column_id")
+    .eq("id", id)
+    .single();
 
   const { data, error } = await supabase
     .from("tasks")
@@ -111,12 +127,35 @@ export async function updateTask(
   if (error) {
     throw new Error(`Update failed: ${error.message}`);
   }
+
+  if (prior?.column_id && prior.column_id !== data.column_id) {
+    await recordTaskEvent(supabase, user.id, id, "moved", {
+      from_column_id: prior.column_id,
+      to_column_id: data.column_id,
+    });
+  } else {
+    await recordTaskEvent(supabase, user.id, id, "updated", {});
+  }
+
   revalidatePath("/");
   return data as Task;
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  const { supabase } = await requireUser();
+  const { supabase, user } = await requireUser();
+  const { data: prior } = await supabase
+    .from("tasks")
+    .select("title")
+    .eq("id", id)
+    .maybeSingle();
+
+  // Record the deletion before the row goes; task_events.task_id is
+  // ON DELETE CASCADE so the row itself would disappear, but a
+  // snapshot of the title preserves the timeline entry.
+  await recordTaskEvent(supabase, user.id, id, "deleted", {
+    title: prior?.title ?? null,
+  });
+
   const { error } = await supabase.from("tasks").delete().eq("id", id);
   if (error) {
     throw new Error(`Delete failed: ${error.message}`);
@@ -126,8 +165,8 @@ export async function deleteTask(id: string): Promise<void> {
 
 const moveSchema = z.object({
   id: z.string().uuid(),
-  status: statusSchema,
-  orderedIdsByStatus: z.record(statusSchema, z.array(z.string().uuid())),
+  column_id: z.string().uuid(),
+  orderedIdsByColumn: z.record(z.string().uuid(), z.array(z.string().uuid())),
 });
 
 export type MoveTaskInput = z.input<typeof moveSchema>;
@@ -136,12 +175,18 @@ export async function moveTask(input: MoveTaskInput): Promise<void> {
   const parsed = moveSchema.parse(input);
   const { supabase, user } = await requireUser();
 
-  // The client sends the authoritative ordering; mirror it to the DB.
-  for (const [status, ids] of Object.entries(parsed.orderedIdsByStatus)) {
+  const { data: prior } = await supabase
+    .from("tasks")
+    .select("column_id")
+    .eq("id", parsed.id)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  for (const [columnId, ids] of Object.entries(parsed.orderedIdsByColumn)) {
     for (let position = 0; position < ids.length; position++) {
       const { error } = await supabase
         .from("tasks")
-        .update({ status, position })
+        .update({ column_id: columnId, position })
         .eq("id", ids[position])
         .eq("user_id", user.id);
       if (error) {
@@ -149,5 +194,37 @@ export async function moveTask(input: MoveTaskInput): Promise<void> {
       }
     }
   }
+
+  if (prior && prior.column_id !== parsed.column_id) {
+    await recordTaskEvent(supabase, user.id, parsed.id, "moved", {
+      from_column_id: prior.column_id,
+      to_column_id: parsed.column_id,
+    });
+  }
+
   revalidatePath("/");
+}
+
+async function recordTaskEvent(
+  supabase: SupabaseClient,
+  userId: string,
+  taskId: string,
+  eventType:
+    | "created"
+    | "completed"
+    | "moved"
+    | "updated"
+    | "deleted"
+    | "importance_set",
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await supabase.from("task_events").insert({
+    user_id: userId,
+    task_id: taskId,
+    event_type: eventType,
+    metadata,
+  });
+  if (error) {
+    console.warn("[task_events] insert failed:", error.message);
+  }
 }

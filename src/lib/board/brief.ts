@@ -1,7 +1,13 @@
 import { generateText } from "ai";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
-import { TASK_STATUSES, type Task, type TaskStatus } from "@/lib/supabase/types";
+import { loadColumnLookup } from "@/lib/board/columns";
+import type { Task, TaskPriority } from "@/lib/supabase/types";
+
+// R3.5 stopped calling this function from the morning cron. The brief panel
+// is now deterministic (see src/app/board/brief-state.ts). This LLM-driven
+// path stays in place for a possible future hybrid mode that stores an
+// optional headline in public.briefs alongside the deterministic rendering.
 
 const BRIEF_SYSTEM_PROMPT = `You are a calm, sharp morning briefer for Bash OS, a single-user life-OS kanban.
 Write one short brief (90 to 130 words) in plain prose — no bullet lists, no headers, no emojis.
@@ -10,14 +16,14 @@ Avoid platitudes, never invent items that aren't in the context, and don't summa
 
 const BRIEF_TIMEZONE = "Asia/Dubai";
 
-type BriefContext = {
+interface BriefContext {
   today: string;
-  countsByStatus: Record<TaskStatus, number>;
+  countsByColumn: Array<{ name: string; count: number }>;
   recentGmailTasks: Pick<Task, "title" | "description" | "created_at">[];
   upcomingCalendarEvents: Pick<Task, "title" | "description" | "due_date">[];
-  activePlateTasks: Pick<Task, "title" | "priority">[];
-  thingsToThinkAboutSample: Pick<Task, "title">[];
-};
+  todayColumnSample: Array<{ title: string; priority: TaskPriority | null }>;
+  inboxColumnSample: Array<{ title: string }>;
+}
 
 export async function generateAndStoreBrief(
   supabase: SupabaseClient,
@@ -43,9 +49,6 @@ export async function generateAndStoreBrief(
     );
   }
 
-  // Upsert on (user_id, brief_date). Re-running the cron same day overwrites
-  // the day's brief rather than stacking — the unique constraint enforces it
-  // at the DB level and the trigger bumps updated_at.
   const { data: inserted, error } = await supabase
     .from("briefs")
     .upsert(
@@ -82,7 +85,7 @@ async function assembleContext(
   const [allTasks, recentGmail, upcomingEvents] = await Promise.all([
     supabase
       .from("tasks")
-      .select("title, status, priority, description, created_at")
+      .select("title, column_id, priority, description, created_at")
       .eq("user_id", userId)
       .order("position", { ascending: true }),
     supabase
@@ -118,30 +121,42 @@ async function assembleContext(
     );
   }
 
-  const tasks = (allTasks.data ?? []) as Task[];
+  const lookup = await loadColumnLookup(supabase, userId);
+  const tasks = (allTasks.data ?? []) as Array<{
+    title: string;
+    column_id: string;
+    priority: TaskPriority | null;
+    description: string | null;
+    created_at: string;
+  }>;
 
-  const countsByStatus = Object.fromEntries(
-    TASK_STATUSES.map((s) => [s, 0]),
-  ) as Record<TaskStatus, number>;
-  for (const t of tasks) countsByStatus[t.status] += 1;
+  const countsByColumn: BriefContext["countsByColumn"] = [];
+  for (const [colId, name] of lookup.byId) {
+    const count = tasks.filter((t) => t.column_id === colId).length;
+    countsByColumn.push({ name, count });
+  }
 
-  const activePlateTasks = tasks
-    .filter((t) => t.status === "todays plate")
-    .map(({ title, priority }) => ({ title, priority }));
+  const todayColumnSample = lookup.todayId
+    ? tasks
+        .filter((t) => t.column_id === lookup.todayId)
+        .map((t) => ({ title: t.title, priority: t.priority }))
+    : [];
 
-  const thingsToThinkAboutSample = tasks
-    .filter((t) => t.status === "things to think about")
-    .slice(0, 6)
-    .map(({ title }) => ({ title }));
+  const inboxColumnSample = lookup.inboxId
+    ? tasks
+        .filter((t) => t.column_id === lookup.inboxId)
+        .slice(0, 6)
+        .map((t) => ({ title: t.title }))
+    : [];
 
   return {
     today: briefDate,
-    countsByStatus,
+    countsByColumn,
     recentGmailTasks: (recentGmail.data ?? []) as BriefContext["recentGmailTasks"],
     upcomingCalendarEvents: (upcomingEvents.data ??
       []) as BriefContext["upcomingCalendarEvents"],
-    activePlateTasks,
-    thingsToThinkAboutSample,
+    todayColumnSample,
+    inboxColumnSample,
   };
 }
 
@@ -150,14 +165,14 @@ function renderContext(ctx: BriefContext): string {
   lines.push(`Today: ${ctx.today}`);
   lines.push("");
   lines.push("Board state (count by column):");
-  for (const status of TASK_STATUSES) {
-    lines.push(`  - ${status}: ${ctx.countsByStatus[status]}`);
+  for (const c of ctx.countsByColumn) {
+    lines.push(`  - ${c.name}: ${c.count}`);
   }
   lines.push("");
 
-  if (ctx.activePlateTasks.length > 0) {
-    lines.push("Today's plate (in order):");
-    for (const t of ctx.activePlateTasks) {
+  if (ctx.todayColumnSample.length > 0) {
+    lines.push("Today column (in order):");
+    for (const t of ctx.todayColumnSample) {
       lines.push(
         `  - ${t.title}${t.priority ? ` [priority: ${t.priority}]` : ""}`,
       );
@@ -165,9 +180,9 @@ function renderContext(ctx: BriefContext): string {
     lines.push("");
   }
 
-  if (ctx.thingsToThinkAboutSample.length > 0) {
-    lines.push("Sampled from 'things to think about':");
-    for (const t of ctx.thingsToThinkAboutSample) {
+  if (ctx.inboxColumnSample.length > 0) {
+    lines.push("Sampled from Inbox:");
+    for (const t of ctx.inboxColumnSample) {
       lines.push(`  - ${t.title}`);
     }
     lines.push("");

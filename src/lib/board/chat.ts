@@ -3,15 +3,16 @@ import { type ModelMessage, stepCountIs, tool, ToolLoopAgent } from "ai";
 import { z } from "zod";
 import { CHAT_MODEL_ID, google } from "@/lib/gemini/client";
 import { searchMemories } from "@/lib/board/memory-search";
+import { loadColumnLookup, resolveColumnId } from "@/lib/board/columns";
 import {
+  TASK_OWNERS,
   TASK_PRIORITIES,
   TASK_SOURCES,
-  TASK_STATUSES,
   type ChatMessage,
   type ChatRole,
   type Task,
+  type TaskOwner,
   type TaskSource,
-  type TaskStatus,
 } from "@/lib/supabase/types";
 
 const CHAT_HISTORY_LIMIT = 20;
@@ -26,16 +27,18 @@ const CHAT_SYSTEM_PROMPT = `You are Bash OS's chat assistant — a calm, sharp h
 You have visibility into the current kanban board, today's calendar events, recently-synced emails, and long-term memories that Bashir has explicitly chosen to remember (retrieved by semantic similarity to the current question). Use this context when it's relevant; ignore it when it isn't. Memories represent facts the user has said are worth remembering — treat them as ground truth about preferences, decisions, or state.
 
 You can take real action on the board through these mutating tools:
-- createTask: add a new task. Use whenever the user asks to capture, add, jot, or queue something. Default to "things to think about" for vague captures and "todays plate" only when the user explicitly says today/now/urgent.
+- createTask: add a new task. Use whenever the user asks to capture, add, jot, or queue something. Default to the "Inbox" column for vague captures and "Today" only when the user explicitly says today/now/urgent. Default to owner "bash". Set owner to "claude" when the user explicitly asks Claude to do something ("have Claude research X", "Claude can handle Y").
 - moveTask: move an existing task to a different column. Refer to the task by a fragment of its title — the tool resolves it server-side.
-- updateTask: change the title, description, priority, or status of an existing task. Pass only the fields that change.
+- updateTask: change the title, description, priority, or column of an existing task. Pass only the fields that change.
 - deleteTask: permanently remove a task. Only call this when the user explicitly asks to delete (not "archive", "move", or "done"). If unsure, ask first.
 
 You also have two read-only lookup tools:
-- findTasks: keyword/filter search across Bashir's full board. Prefer this for specific lookups ("any task about X?", "what's in Bash work?") rather than scanning the injected board snapshot, which is truncated per column. Filter by status or source when the request is column- or source-specific.
+- findTasks: keyword/filter search across Bashir's full board. Prefer this for specific lookups ("any task about X?", "what's in Active?") rather than scanning the injected board snapshot, which is truncated per column. Filter by column or source when the request is column- or source-specific.
 - findMemories: semantic search over the long-term memory store, beyond the per-turn auto-injected matches. Reach for it when the user asks "what did I say about…" or when the visible memories don't cover what's needed.
 
 When a tool returns a "needs clarification" error listing candidates, surface those candidates to the user and ask which one they meant — do not pick one yourself.
+
+Columns are user-managed and named freely (the starter set is Inbox / Today / Active / Review / Done). Use the column name as the user sees it. If you can't tell which column the user means, ask.
 
 Keep replies tight: a few sentences for most questions, a short list only when explicitly asked for structure. No emojis, no over-apologizing, no preamble like "Sure! Let me help…". When the user gives you a fact worth remembering long-term, acknowledge it in one short sentence — the UI handles persistence.
 When the user asks for next-action proposals, name specific items by their titles. If something the user is asking about isn't in the context, say so plainly.`;
@@ -44,7 +47,12 @@ When the user asks for next-action proposals, name specific items by their title
 // Task resolution (by title fragment)
 // ---------------------------------------------------------------------------
 
-type ResolvedTask = Pick<Task, "id" | "title" | "status">;
+interface ResolvedTask {
+  id: string;
+  title: string;
+  column_id: string;
+  columnName: string;
+}
 
 async function resolveTaskByQuery(
   supabase: SupabaseClient,
@@ -58,29 +66,58 @@ async function resolveTaskByQuery(
   const safe = trimmed.replace(/[%,()]/g, " ");
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, title, status")
+    .select("id, title, column_id")
     .eq("user_id", userId)
     .ilike("title", `%${safe}%`)
     .order("updated_at", { ascending: false })
     .limit(RESOLVE_CANDIDATE_LIMIT);
   if (error) throw new Error(`Task lookup failed: ${error.message}`);
 
-  const rows = (data ?? []) as ResolvedTask[];
+  const rows = (data ?? []) as Array<{ id: string; title: string; column_id: string }>;
   if (rows.length === 0) {
     throw new Error(
       `No task matches "${trimmed}". Ask the user to clarify or restate the title.`,
     );
   }
 
+  const lookup = await loadColumnLookup(supabase, userId);
+
   const lower = trimmed.toLowerCase();
   const exact = rows.find((r) => r.title.toLowerCase() === lower);
-  if (exact) return exact;
+  const decorate = (r: { id: string; title: string; column_id: string }): ResolvedTask => ({
+    id: r.id,
+    title: r.title,
+    column_id: r.column_id,
+    columnName: lookup.byId.get(r.column_id) ?? "(unknown column)",
+  });
+  if (exact) return decorate(exact);
 
-  if (rows.length === 1) return rows[0];
+  if (rows.length === 1) return decorate(rows[0]);
 
-  const list = rows.map((r) => `- "${r.title}" [${r.status}]`).join("\n");
+  const list = rows
+    .map((r) => `- "${r.title}" [${lookup.byId.get(r.column_id) ?? "(unknown)"}]`)
+    .join("\n");
   throw new Error(
     `Needs clarification: "${trimmed}" matches ${rows.length} tasks:\n${list}\nAsk the user which one they meant.`,
+  );
+}
+
+async function resolveColumnByName(
+  supabase: SupabaseClient,
+  userId: string,
+  name: string,
+): Promise<{ id: string; name: string }> {
+  const { data } = await supabase
+    .from("columns")
+    .select("id, name")
+    .eq("user_id", userId);
+  const rows = (data ?? []) as Array<{ id: string; name: string }>;
+  const lower = name.trim().toLowerCase();
+  const exact = rows.find((r) => r.name.toLowerCase() === lower);
+  if (exact) return exact;
+  const list = rows.map((r) => `"${r.name}"`).join(", ");
+  throw new Error(
+    `Column "${name}" not found. Available columns: ${list}. Ask the user which one they meant.`,
   );
 }
 
@@ -96,10 +133,17 @@ const createTaskInputSchema = z.object({
     .max(10_000)
     .optional()
     .describe("Optional longer detail or context"),
-  status: z
-    .enum(TASK_STATUSES)
+  column: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
     .optional()
-    .describe("Which kanban column. Default 'things to think about' if unclear."),
+    .describe("Column name. Default 'Inbox' for vague captures."),
+  owner: z
+    .enum(TASK_OWNERS)
+    .optional()
+    .describe("'bash' (default) or 'claude' when Bashir asks Claude to handle the task."),
   priority: z.enum(TASK_PRIORITIES).optional().describe("Optional priority"),
 });
 
@@ -110,7 +154,7 @@ const moveTaskInputSchema = z.object({
     .min(1)
     .max(300)
     .describe("Title (or distinctive fragment) of the task to move."),
-  toStatus: z.enum(TASK_STATUSES).describe("Destination column."),
+  toColumn: z.string().trim().min(1).max(80).describe("Destination column name."),
 });
 
 const updateTaskInputSchema = z.object({
@@ -128,8 +172,11 @@ const updateTaskInputSchema = z.object({
     .optional()
     .describe("New description. Pass empty string to clear."),
   priority: z.enum(TASK_PRIORITIES).optional().describe("New priority."),
-  status: z
-    .enum(TASK_STATUSES)
+  column: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
     .optional()
     .describe(
       "Move to a different column. Prefer moveTask when only the column changes.",
@@ -159,10 +206,13 @@ const findTasksInputSchema = z.object({
     .describe(
       "Keyword fragment matched against title and description (case-insensitive). Omit to list by filter alone.",
     ),
-  status: z
-    .enum(TASK_STATUSES)
+  column: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
     .optional()
-    .describe("Restrict to a specific kanban column."),
+    .describe("Restrict to a specific column by name."),
   source: z
     .enum(TASK_SOURCES)
     .optional()
@@ -208,41 +258,78 @@ type DeleteTaskInput = z.infer<typeof deleteTaskInputSchema>;
 type FindTasksInput = z.infer<typeof findTasksInputSchema>;
 type FindMemoriesInput = z.infer<typeof findMemoriesInputSchema>;
 
-type TaskSummary = {
+interface TaskSummary {
   id: string;
   title: string;
-  status: TaskStatus;
+  column: string;
+  owner: TaskOwner;
   source: TaskSource;
   source_account: string | null;
   priority: Task["priority"];
   due_date: string | null;
-};
+}
 
-type MemoryMatchSummary = {
+interface MemoryMatchSummary {
   id: string;
   content: string;
   similarity: number;
   created_at: string;
-};
+}
 
-type TaskMutationResult = {
+interface TaskMutationResult {
   id: string;
   title: string;
-  status: TaskStatus;
-};
+  column: string;
+}
+
+async function recordTaskEvent(
+  supabase: SupabaseClient,
+  userId: string,
+  taskId: string,
+  eventType:
+    | "created"
+    | "completed"
+    | "moved"
+    | "updated"
+    | "deleted"
+    | "importance_set",
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await supabase.from("task_events").insert({
+    user_id: userId,
+    task_id: taskId,
+    event_type: eventType,
+    metadata,
+  });
+  if (error) {
+    console.warn("[task_events] insert failed:", error.message);
+  }
+}
 
 async function execCreateTask(
   supabase: SupabaseClient,
   userId: string,
   args: CreateTaskInput,
 ): Promise<TaskMutationResult> {
-  const status: TaskStatus = args.status ?? "things to think about";
+  let columnId: string | null;
+  let columnName: string;
+  if (args.column) {
+    const resolved = await resolveColumnByName(supabase, userId, args.column);
+    columnId = resolved.id;
+    columnName = resolved.name;
+  } else {
+    columnId = await resolveColumnId(supabase, userId, "Inbox");
+    columnName = "Inbox";
+  }
+  if (!columnId) {
+    throw new Error("createTask: no Inbox column found for user.");
+  }
 
   const { data: maxPos } = await supabase
     .from("tasks")
     .select("position")
     .eq("user_id", userId)
-    .eq("status", status)
+    .eq("column_id", columnId)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -254,31 +341,42 @@ async function execCreateTask(
       user_id: userId,
       title: args.title,
       description: args.description ?? null,
-      status,
+      column_id: columnId,
+      owner: args.owner ?? "bash",
       priority: args.priority ?? null,
       position,
     })
-    .select("id, title, status")
+    .select("id, title, column_id")
     .single();
   if (error) throw new Error(`createTask: ${error.message}`);
-  return data as TaskMutationResult;
+  await recordTaskEvent(supabase, userId, data.id, "created", {
+    source: "chat",
+    column_id: data.column_id,
+  });
+  return { id: data.id, title: data.title, column: columnName };
 }
 
 async function execMoveTask(
   supabase: SupabaseClient,
   userId: string,
   args: MoveTaskInput,
-): Promise<TaskMutationResult & { fromStatus: TaskStatus }> {
+): Promise<TaskMutationResult & { fromColumn: string }> {
   const target = await resolveTaskByQuery(supabase, userId, args.taskQuery);
-  if (target.status === args.toStatus) {
-    return { ...target, fromStatus: target.status };
+  const destination = await resolveColumnByName(supabase, userId, args.toColumn);
+  if (target.column_id === destination.id) {
+    return {
+      id: target.id,
+      title: target.title,
+      column: destination.name,
+      fromColumn: target.columnName,
+    };
   }
 
   const { data: maxPos } = await supabase
     .from("tasks")
     .select("position")
     .eq("user_id", userId)
-    .eq("status", args.toStatus)
+    .eq("column_id", destination.id)
     .order("position", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -286,16 +384,24 @@ async function execMoveTask(
 
   const { data, error } = await supabase
     .from("tasks")
-    .update({ status: args.toStatus, position })
+    .update({ column_id: destination.id, position })
     .eq("id", target.id)
     .eq("user_id", userId)
-    .select("id, title, status")
+    .select("id, title")
     .single();
   if (error) throw new Error(`moveTask: ${error.message}`);
 
+  await recordTaskEvent(supabase, userId, target.id, "moved", {
+    from_column_id: target.column_id,
+    to_column_id: destination.id,
+    source: "chat",
+  });
+
   return {
-    ...(data as TaskMutationResult),
-    fromStatus: target.status,
+    id: data.id,
+    title: data.title,
+    column: destination.name,
+    fromColumn: target.columnName,
   };
 }
 
@@ -312,17 +418,23 @@ async function execUpdateTask(
     patch.description = args.description === "" ? null : args.description;
   }
   if (args.priority !== undefined) patch.priority = args.priority;
-  if (args.status !== undefined && args.status !== target.status) {
-    patch.status = args.status;
-    const { data: maxPos } = await supabase
-      .from("tasks")
-      .select("position")
-      .eq("user_id", userId)
-      .eq("status", args.status)
-      .order("position", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    patch.position = (maxPos?.position ?? -1) + 1;
+
+  let destinationColumn: { id: string; name: string } | null = null;
+  if (args.column !== undefined) {
+    const dest = await resolveColumnByName(supabase, userId, args.column);
+    if (dest.id !== target.column_id) {
+      destinationColumn = dest;
+      patch.column_id = dest.id;
+      const { data: maxPos } = await supabase
+        .from("tasks")
+        .select("position")
+        .eq("user_id", userId)
+        .eq("column_id", dest.id)
+        .order("position", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      patch.position = (maxPos?.position ?? -1) + 1;
+    }
   }
 
   if (Object.keys(patch).length === 0) {
@@ -334,12 +446,28 @@ async function execUpdateTask(
     .update(patch)
     .eq("id", target.id)
     .eq("user_id", userId)
-    .select("id, title, status")
+    .select("id, title, column_id")
     .single();
   if (error) throw new Error(`updateTask: ${error.message}`);
 
+  await recordTaskEvent(
+    supabase,
+    userId,
+    target.id,
+    destinationColumn ? "moved" : "updated",
+    destinationColumn
+      ? {
+          from_column_id: target.column_id,
+          to_column_id: destinationColumn.id,
+          source: "chat",
+        }
+      : { source: "chat" },
+  );
+
   return {
-    ...(data as TaskMutationResult),
+    id: data.id,
+    title: data.title,
+    column: destinationColumn?.name ?? target.columnName,
     changedFields: Object.keys(patch).filter((k) => k !== "position"),
   };
 }
@@ -351,6 +479,11 @@ async function execDeleteTask(
 ): Promise<TaskMutationResult> {
   const target = await resolveTaskByQuery(supabase, userId, args.taskQuery);
 
+  await recordTaskEvent(supabase, userId, target.id, "deleted", {
+    title: target.title,
+    source: "chat",
+  });
+
   const { error } = await supabase
     .from("tasks")
     .delete()
@@ -358,7 +491,7 @@ async function execDeleteTask(
     .eq("user_id", userId);
   if (error) throw new Error(`deleteTask: ${error.message}`);
 
-  return target;
+  return { id: target.id, title: target.title, column: target.columnName };
 }
 
 async function execFindTasks(
@@ -371,12 +504,20 @@ async function execFindTasks(
     FIND_TASKS_MAX_LIMIT,
   );
 
+  let columnId: string | null = null;
+  if (args.column) {
+    const resolved = await resolveColumnByName(supabase, userId, args.column);
+    columnId = resolved.id;
+  }
+
   let query = supabase
     .from("tasks")
-    .select("id, title, status, source, source_account, priority, due_date")
+    .select(
+      "id, title, column_id, owner, source, source_account, priority, due_date",
+    )
     .eq("user_id", userId);
 
-  if (args.status) query = query.eq("status", args.status);
+  if (columnId) query = query.eq("column_id", columnId);
   if (args.source) query = query.eq("source", args.source);
 
   if (args.query && args.query.length > 0) {
@@ -391,7 +532,28 @@ async function execFindTasks(
 
   if (error) throw new Error(`findTasks: ${error.message}`);
 
-  const tasks = (data ?? []) as TaskSummary[];
+  const lookup = await loadColumnLookup(supabase, userId);
+  type FoundRow = {
+    id: string;
+    title: string;
+    column_id: string;
+    owner: TaskOwner;
+    source: TaskSource;
+    source_account: string | null;
+    priority: Task["priority"];
+    due_date: string | null;
+  };
+  const rows = (data ?? []) as FoundRow[];
+  const tasks: TaskSummary[] = rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    column: lookup.byId.get(r.column_id) ?? "(unknown)",
+    owner: r.owner,
+    source: r.source,
+    source_account: r.source_account,
+    priority: r.priority,
+    due_date: r.due_date,
+  }));
   return { tasks, count: tasks.length };
 }
 
@@ -443,7 +605,7 @@ export function buildAgent(supabase: SupabaseClient, userId: string) {
       }),
       updateTask: tool({
         description:
-          "Change the title, description, priority, or status of an existing task. Pass only the fields that should change.",
+          "Change the title, description, priority, or column of an existing task. Pass only the fields that should change.",
         inputSchema: updateTaskInputSchema,
         execute: (args) => execUpdateTask(supabase, userId, args),
       }),
@@ -560,36 +722,52 @@ async function buildContextLines(
     now.getTime() + CALENDAR_HORIZON_HOURS * 60 * 60 * 1000,
   ).toISOString();
 
-  const [tasks, upcomingEvents, recentGmail, memories] = await Promise.all([
-    supabase
-      .from("tasks")
-      .select("title, status, priority")
-      .eq("user_id", userId)
-      .order("position", { ascending: true }),
-    supabase
-      .from("tasks")
-      .select("title, due_date")
-      .eq("user_id", userId)
-      .eq("source", "calendar")
-      .gte("due_date", now.toISOString())
-      .lte("due_date", calendarHorizon)
-      .order("due_date", { ascending: true })
-      .limit(12),
-    supabase
-      .from("tasks")
-      .select("title, description, source_account, created_at")
-      .eq("user_id", userId)
-      .eq("source", "gmail")
-      .gte("created_at", gmailSince)
-      .order("created_at", { ascending: false })
-      .limit(8),
-    searchMemories(supabase, userMessage, MEMORY_MATCH_LIMIT).catch((err) => {
-      console.error("[chat] memory search failed:", err);
-      return [];
-    }),
-  ]);
+  const [columnsRes, tasksRes, upcomingEventsRes, recentGmailRes, memories] =
+    await Promise.all([
+      supabase
+        .from("columns")
+        .select("id, name, position")
+        .eq("user_id", userId)
+        .order("position", { ascending: true }),
+      supabase
+        .from("tasks")
+        .select("title, column_id, priority, owner")
+        .eq("user_id", userId)
+        .order("position", { ascending: true }),
+      supabase
+        .from("tasks")
+        .select("title, due_date")
+        .eq("user_id", userId)
+        .eq("source", "calendar")
+        .gte("due_date", now.toISOString())
+        .lte("due_date", calendarHorizon)
+        .order("due_date", { ascending: true })
+        .limit(12),
+      supabase
+        .from("tasks")
+        .select("title, description, source_account, created_at")
+        .eq("user_id", userId)
+        .eq("source", "gmail")
+        .gte("created_at", gmailSince)
+        .order("created_at", { ascending: false })
+        .limit(8),
+      searchMemories(supabase, userMessage, MEMORY_MATCH_LIMIT).catch((err) => {
+        console.error("[chat] memory search failed:", err);
+        return [];
+      }),
+    ]);
 
-  const allTasks = (tasks.data ?? []) as Task[];
+  const columns = (columnsRes.data ?? []) as Array<{
+    id: string;
+    name: string;
+    position: number;
+  }>;
+  const allTasks = (tasksRes.data ?? []) as Array<{
+    title: string;
+    column_id: string;
+    priority: Task["priority"];
+    owner: TaskOwner;
+  }>;
 
   const lines: string[] = [];
   lines.push(`Today: ${now.toISOString().slice(0, 10)}`);
@@ -603,14 +781,18 @@ async function buildContextLines(
     lines.push("");
   }
 
-  lines.push("Board (tasks by column — refer to them by title when calling tools):");
-  for (const status of TASK_STATUSES) {
-    const inColumn = allTasks.filter((t) => t.status === status);
-    lines.push(`  ${status} (${inColumn.length}):`);
+  lines.push(
+    "Board (tasks by column — refer to them by title when calling tools):",
+  );
+  for (const col of columns) {
+    const inColumn = allTasks.filter((t) => t.column_id === col.id);
+    lines.push(`  ${col.name} (${inColumn.length}):`);
     for (const t of inColumn.slice(0, CONTEXT_TASKS_PER_COLUMN)) {
-      lines.push(
-        `    - ${t.title}${t.priority ? ` [${t.priority}]` : ""}`,
-      );
+      const tags: string[] = [];
+      if (t.priority) tags.push(t.priority);
+      if (t.owner === "claude") tags.push("claude");
+      const suffix = tags.length > 0 ? ` [${tags.join(", ")}]` : "";
+      lines.push(`    - ${t.title}${suffix}`);
     }
     if (inColumn.length > CONTEXT_TASKS_PER_COLUMN) {
       lines.push(
@@ -620,9 +802,9 @@ async function buildContextLines(
   }
   lines.push("");
 
-  if ((upcomingEvents.data ?? []).length > 0) {
+  if ((upcomingEventsRes.data ?? []).length > 0) {
     lines.push("Calendar (next 24h):");
-    for (const e of upcomingEvents.data ?? []) {
+    for (const e of upcomingEventsRes.data ?? []) {
       const when = e.due_date
         ? new Date(e.due_date as string).toLocaleString(undefined, {
             weekday: "short",
@@ -636,9 +818,9 @@ async function buildContextLines(
     lines.push("");
   }
 
-  if ((recentGmail.data ?? []).length > 0) {
+  if ((recentGmailRes.data ?? []).length > 0) {
     lines.push("Recent emails (last 48h):");
-    for (const t of recentGmail.data ?? []) {
+    for (const t of recentGmailRes.data ?? []) {
       const snippet = ((t.description as string | null) ?? "")
         .replace(/^From:.*?\n\n/, "")
         .slice(0, 120);
