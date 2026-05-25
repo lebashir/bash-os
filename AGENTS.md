@@ -14,6 +14,7 @@ A personal life-OS web app: kanban board + connectors + chat assistant + memory 
 - `docs/ROUNDS.md` — what's shipped vs planned, round-by-round. Current round status at the bottom.
 - `docs/ARCHITECTURE.md` — non-obvious decisions (token storage truth, RAG flow, the Tabby TLS workaround, etc.).
 - `docs/KNOWN_ISSUES.md` — live wonkiness and "don't waste time on this" notes.
+- `~/lifeofbash/CLAUDE.md` — the substrate this repo is meant to be a view onto. lifeofbash is the long-lived personal-OS folder (people, projects, routines, playbooks, memory) at `lebashir/lifeofbash` on GitHub, now live with real content + a local stdio MCP. **Not yet connected to this repo:** no sync scripts exist, and bash-os does not read the substrate today. The bridge is being designed — local-side push *into* bash-os, since this deployed app can't reach a local stdio MCP. If working across both, read its CLAUDE.md too.
 
 ## Working norms
 
@@ -48,4 +49,4 @@ A personal life-OS web app: kanban board + connectors + chat assistant + memory 
 
 ## Current round
 
-R1, R2, R2.5, R3 (R3a + R3b), and R3.5 (UX redesign + custom columns + owner + command bar + agent activity + email triage) are complete. A small follow-up round **R3.5c** holds the trimmed items: board filter/sort, recurring tasks UI + cron, right-panel chat history. Next strategic round is R4 (autonomous Claude-owned tasks). See `docs/ROUNDS.md` for the active plan — if a session starts and there's no explicit ask, that file is the answer to "what's next".
+R1, R2, R2.5, R3 (R3a + R3b), and R3.5 (UX redesign + custom columns + owner + command bar + agent activity + email triage) are complete. A small follow-up round **R3.5c** holds the trimmed items: board filter/sort, recurring tasks UI + cron, right-panel chat history. **R3.6** introduces the lifeofbash substrate as a separate repo (the source of truth for personal/life data; this repo is one view onto it). R4 (local Claude Code daemon for autonomous Claude-owned tasks) lands on top of R3.6 — the daemon lives inside lifeofbash at `~/lifeofbash/tools/daemon/`. See `docs/ROUNDS.md` for the active plan — if a session starts and there's no explicit ask, that file is the answer to "what's next".
