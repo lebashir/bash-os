@@ -130,10 +130,22 @@ Nothing about R3.5 blocks these; they were trimmed for scope.
 
 ---
 
+## R3.6 — Bootstrap lifeofbash substrate — 🔜 Planned, not started
+
+The substrate split. Before R4 builds an execution layer, lifeofbash gets created as its own repo — Bashir's personal-operating-system folder, the long-lived markdown store of life data (people, projects, routines, playbooks, memory, decisions, inbox). bash-os (this repo) is the web *view* onto that substrate; the R4 daemon will be one *executor*. The substrate lives outside this repo so it outlives any specific view or executor.
+
+- *Where it lives:* `lebashir/lifeofbash` (private), cloned to `~/lifeofbash/`. Personal GitHub, not Tabby — portable across employers.
+- *What ships in R3.6:* folder skeleton + root CLAUDE.md + README + per-folder CLAUDE.md files + templates (people, projects, routines, playbooks) + memory stubs (`style.md`, `task-patterns.md`, `decisions.md`) + `.gitignore` + `docs/cc-prompts/` archive convention inherited from this repo.
+- *What does NOT ship in R3.6:* real content (no real people, no real project entries, no memory entries). Real content lands in subsequent CC sessions inside lifeofbash with Bashir curating. R3.6 is the empty house — every room framed, no furniture.
+- *Daemon, MCP server, sync scripts:* deferred. R3.6 leaves room for them (the `tools/` folder + its CLAUDE.md describe the daemon's eventual home at `~/lifeofbash/tools/daemon/`) but the bootstrap doesn't build them.
+- *Prompt:* `docs/cc-prompts/r3-6-bootstrap-lifeofbash.md` (this repo). Self-contained, runnable. Once executed inside the new lifeofbash repo, future planning for the substrate moves into lifeofbash's own `docs/cc-prompts/`. From R3.6 onward, planning for the substrate happens in lifeofbash; planning for the web view happens here.
+
+---
+
 ## R4 — Local Claude Code daemon executes Claude-owned tasks — 🔜 Planned, not started
 
-- *Why it matters:* R3.5 made `owner='claude'` a first-class field but nothing happens automatically when a task is assigned to Claude. R4 turns that field into a real execution trigger — Bashir marks a task `owner='claude'`, the daemon picks it up, Claude Code runs the task, the output lands in Review for Bashir to approve.
-- *Rough shape (Pattern B from tonight's planning conversation):* the executor is a long-running daemon on Bashir's laptop (separate repo, `bash-os-daemon`), not a Vercel agent. It polls the bash-os API every 30s for `owner='claude'` tasks in pickable state, launches Claude Code headless with a task-derived prompt, hooks POST progress events to `/api/agent-events` as work happens. On successful exit the daemon moves the task to Review with `needs_review=true` and a populated `tasks.output` field. Bashir's "Approve" → Done; "Reject with feedback" → back to Active with the feedback appended.
+- *Why it matters:* R3.5 made `owner='claude'` a first-class field but nothing happens automatically when a task is assigned to Claude. R4 turns that field into a real execution trigger — Bashir marks a task `owner='claude'`, the daemon picks it up, Claude Code runs the task in the right working directory, the output lands in Review for Bashir to approve.
+- *Rough shape:* the executor is a long-running daemon on Bashir's laptop, living inside the lifeofbash substrate at `~/lifeofbash/tools/daemon/` (not a separate repo — substrate carries its own automation so a single `git clone` brings everything across laptops). It polls the bash-os API every 30s for `owner='claude'` tasks in pickable state, resolves each task's working directory via the substrate (tag → project reference file → `working_dir`), launches Claude Code headless there with a task-derived prompt and the bash-os MCP server configured. The CC session posts progress events to `/api/agent-events` as work happens. On successful exit the daemon moves the task to Review with `needs_review=true`, populates `tasks.output`, and writes an archive note back into the relevant `~/lifeofbash/projects/.../archive/` folder. Bashir's "Approve" → Done; "Reject with feedback" → back to Active with the feedback appended.
 - *Out of scope:* self-selection (R5), autonomous task creation (R6), autonomous decomposition (R7), continuous mode (R8).
 - *Cross-cutting constraint:* R4 has to bake in the five design considerations from `docs/ARCHITECTURE.md` → "Autonomous agent loop architecture (planned)" — trust boundary (`requires_review`), cost budgets, decision auditability, stop conditions, review-queue backpressure. Even though R4 only implements the daemon execution slice, the slice has to respect them so R5-R8 can layer on without retrofitting.
 - *Prompt:* see `docs/cc-prompts/r4-pattern-b-daemon.md` (DRAFT — flesh out with Bashir before running).
