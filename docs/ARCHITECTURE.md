@@ -91,7 +91,9 @@ public.tasks.snoozed_until timestamptz
 2. `20260519050000_r3_5_seed_columns_and_migrate_tasks.sql` — seeds the 5 starter columns for every user with at least one task row, back-fills `column_id` + `owner` + `needs_review` based on legacy status. Verifies zero rows have null `column_id` via a DO block.
 3. `20260519060000_r3_5_drop_status_column.sql` — destructive. Drops `tasks.status`, drops the old `tasks_user_status_position_idx`, locks `column_id` to NOT NULL.
 
-**No hardcoded column names in app logic.** App paths that need a "well-known" column (gmail sync → Inbox, jira sync → Active) resolve via `resolveColumnId(supabase, userId, name)` in `src/lib/board/columns.ts`. Falls back to the user's lowest-position column if the requested name doesn't exist (covers rename / delete).
+Later, pillar 3 (2026-05-26) added `staged_emails` (`20260526120000`), changed `task_events.task_id` to `ON DELETE SET NULL` + added `staged_emails.snoozed_until` (`20260526130000`), and **dropped the dormant `pending_emails`** (`20260526140000`) once external ingestion replaced the in-app triage queue.
+
+**No hardcoded column names in app logic.** App paths that need a "well-known" column (the triage promote → Inbox; the external ingestion → Inbox/Today) resolve via `resolveColumnId(supabase, userId, name)` in `src/lib/board/columns.ts`. Falls back to the user's lowest-position column if the requested name doesn't exist (covers rename / delete).
 
 **R4 hookpoint.** R4 wants to scan for `owner='claude'` tasks, execute them, and move into Review with `needs_review=true`. That's now a single index lookup (`idx_tasks_owner`) plus a column-id-by-name resolve.
 
@@ -109,14 +111,14 @@ The brief panel is a **deterministic** server action that reads current DB state
 | `tasks-overdue` | active task (non-Done) with `due_date < now` | red | (toast — future: open overdue list) |
 | `emails-urgent` | active board task with `source='gmail'` AND `importance >= 9` | red | (toast — future: filter board) |
 | `needs-review` | active task with `needs_review = true` | amber | dispatches `bash-os:filter-column` CustomEvent with the Review column id |
-| `emails-triage` | pending_emails row count > 0 | amber | dispatches `bash-os:open-triage` CustomEvent → opens `TriageModal` |
+| `emails-triage` | `staged_emails` with `decision='pending'` (unsnoozed) count > 0 | amber | dispatches `bash-os:open-triage` CustomEvent → opens `TriageModal` |
 | `items-unsnoozed` | task with `snoozed_until` in the last 24h | blue | (toast) |
 
 **Day update card** (always rendered): next calendar event with countdown, then "N on plate · M urgent · K in inbox" stats. Counts are computed by filtering the snapshot (no extra queries).
 
 **Why deterministic.** R2 generated the brief via Gemini. Two problems: (1) every cron run cost a model call to summarize state the user could read at a glance from the board, (2) the LLM occasionally invented context that wasn't there. R3.5's panel can't hallucinate — every bar's count comes from a literal SQL filter. `public.briefs` stays in place for a possible future hybrid mode (an LLM-generated headline overlaid on the deterministic panel) but the cron no longer writes to it.
 
-**Snoozed items.** The state query filters `tasks.snoozed_until` and `pending_emails.snoozed_until` with `is.null OR <= now`, so a snoozed item is invisible to the panel until its time comes.
+**Snoozed items.** The state query filters `tasks.snoozed_until` and `staged_emails.snoozed_until` with `is.null OR <= now`, so a snoozed item is invisible to the panel until its time comes.
 
 ---
 
@@ -130,7 +132,7 @@ Chat moved out of the right-side drawer (`ChatLauncher.tsx` deleted) and into a 
 
 **Popover semantics.** Slides up above the bar on submit, shows the last 8 turns, supports Stop + Clear. Click-outside or Escape closes it; the messages survive (they're persisted server-side anyway).
 
-**Drawer is gone.** `BriefDrawer.tsx`, `ChatLauncher.tsx`, and `SyncButton.tsx` were all deleted in R3.5. The brief lives in the left panel; sync runs from the morning cron (no manual button — Bashir can hit `/api/cron/daily-brief` with the bearer secret if he ever needs to force a re-sync).
+**Drawer is gone.** `BriefDrawer.tsx`, `ChatLauncher.tsx`, and `SyncButton.tsx` were all deleted in R3.5. The brief lives in the left panel. There is no in-app sync to trigger anymore — ingestion runs as external lifeofbash local jobs that push tasks + `staged_emails` into Supabase (pillar 3).
 
 ---
 
@@ -160,30 +162,34 @@ Returns `{ ok: true, id, created_at }` on success, 401 on missing/bad bearer, 40
 
 **Internal events.** Bash OS itself writes to the same table:
 
-- `/api/cron/daily-brief` — one event per user per run, source `cron`, action `morning sync`, payload with per-source counts.
 - `/api/chat` — one event per user turn, source `chat`, action `message`, target = first 120 chars of the prompt.
 
-Future: gmail/calendar/jira sync paths could each write a per-account event. Not in R3.5 — kept the noise down.
+The external lifeofbash ingestion can post its own run events here too (source = the job). The old `/api/cron/daily-brief` "morning sync" event went away with the in-app sync (pillar 3).
 
 **R4 hookpoint.** When R4 wires autonomous Claude-owned execution, each agent step (start, tool call, completion) becomes an `agent_events` row tagged `source='r4-worker'`, project = the originating task, action describing the step. The feed already renders that shape.
 
 ---
 
-## Email triage flow (R3.5)
+## Email triage flow (R3.5 → pillar 3)
 
-R3a admitted any email with `importance >= 4` to the board. R3.5 splits the admit band into two:
+The 3-tier route (auto-task / triage / drop) is unchanged in spirit, but the
+scoring and writing moved out of bash-os. External lifeofbash local jobs score
+Gmail against shared rules and write the results into this Supabase:
 
-| Score | Routing | UI |
+| Band | Routing | UI |
 |---|---|---|
-| 8-10 | Auto-task to Inbox column with `source='gmail'`, `importance` set | Renders on board immediately. |
-| 4-7 | Insert into `public.pending_emails` (subject, sender, snippet, score) | Triage queue. Brief panel shows an amber "N emails to review" bar; click opens `TriageModal`. |
-| 0-3 | Drop silently | Visible only with `/?show_filtered=1` for rubric debugging. |
+| ADMIT (score 8-10) | Auto-task to Inbox with `source='gmail'`, `importance` set, `tags` | Renders on board immediately. |
+| TRIAGE/DROP (score 4-7 / low) | Insert into `public.staged_emails` carrying the scorer's full guess (`band`, `reason`, `scorer_title`, `scorer_tags`, `decision='pending'`) | Triage queue. Brief panel shows an amber "N emails to review" bar; click opens `TriageModal`. |
 
-**Triage modal**: keyboard-driven (`↑↓` navigate, `T` make task, `D` dismiss, `S` snooze 24h, `O` open in Gmail). "Make task" promotes the pending row into a board task in Inbox (records a `task_events` 'created' row tagged `source='triage'`) and deletes the pending row.
+(The R3.5 in-app `pending_emails` table was dropped once `staged_emails` replaced it — see migration `20260526140000`.)
 
-**Snooze semantics**. Both `tasks.snoozed_until` and `pending_emails.snoozed_until` mean "treat this row as invisible until that timestamp passes". The brief panel's state query honors it (`is.null OR <= now`). A nightly `/api/cron/unsnooze` at 20:05 UTC (00:05 Dubai) clears expired snoozes — items literally reappear at the start of the user's local day.
+**Triage modal**: keyboard-driven (`↑↓` navigate, `T` make task, `D` dismiss, `S` snooze 24h, `O` open in Gmail). The actions **soft-delete** the staged row rather than removing it: "Make task" inserts a board task in Inbox (records a `task_events` 'created' row tagged `source='triage'`) and sets the staged row's `decision='promoted'`; dismiss sets `decision='dropped'`; snooze sets `snoozed_until`. The row survives so the verdict can be read back.
 
-**Why 4-7 isn't just "auto-task with a flag".** Phase 9 needed a separation between "this email definitely deserves your attention" (8-10) and "this might be useful, you decide" (4-7). Surfacing the 4-7 band as an attention bar with a single decision point is faster than triaging each one as a board task — Bashir reads the snippet, hits T or D, moves on.
+**Closing the loop (Slice B).** Bashir's verdicts are a training signal. A lifeofbash job (`sync-decisions`) reads decided `staged_emails` rows plus deleted-task events (gmail tasks he removed — the "over-admit" signal, captured because `task_events.task_id` is now `ON DELETE SET NULL` and the delete handlers stamp `source`/`source_id`) and appends `verdict` records to a committed `decisions.jsonl`, joined by `source_id` to the original scorer predictions.
+
+**Snooze semantics**. Both `tasks.snoozed_until` and `staged_emails.snoozed_until` mean "treat this row as invisible until that timestamp passes". The brief panel's state query honors it (`is.null OR <= now`). A nightly `/api/cron/unsnooze` at 20:05 UTC (00:05 Dubai) clears expired snoozes — items literally reappear at the start of the user's local day.
+
+**Why TRIAGE isn't just "auto-task with a flag".** Separation between "this definitely deserves your attention" (ADMIT) and "this might be useful, you decide" (TRIAGE) — surfacing the latter as one attention bar with a single decision point is faster than triaging each as a board task. Bashir reads the snippet, hits T or D, moves on.
 
 ---
 
@@ -253,15 +259,15 @@ Index: HNSW on `memories.embedding` with `vector_cosine_ops`. Fine for read-heav
 
 ## Cron security
 
-`/api/cron/daily-brief` is publicly addressable (Vercel cron uses an HTTP call into the deployment) so it has to authenticate the caller. Pattern:
+`/api/cron/unsnooze` is publicly addressable (Vercel cron uses an HTTP call into the deployment) so it has to authenticate the caller. Pattern:
 
 - Env: `CRON_SECRET` is a random string set in Vercel.
 - Vercel cron is configured to send `Authorization: Bearer <value-of-CRON_SECRET>` automatically (Vercel injects this when the cron is declared in `vercel.json`).
 - The route's `verifyCronSecret` function compares the header to `process.env.CRON_SECRET`. Anything else: 401.
 
-This is the same pattern Vercel docs recommend. The route uses the service-role admin client because it operates across all users (RLS would block a normal authenticated client). The admin client never leaves this route + the brief generation pipeline; it's not exposed to anything user-facing.
+This is the same pattern Vercel docs recommend. The route uses the service-role admin client because it operates across all users (RLS would block a normal authenticated client). The admin client never leaves this route; it's not exposed to anything user-facing. (The `/api/cron/daily-brief` route that previously also used this pattern was removed in pillar 3.)
 
-Manual invocation: `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. Returns a JSON summary of what ran per user, useful for debugging.
+Manual invocation: `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/unsnooze`. Returns `{ok, tasksUnsnoozed, stagedEmailsUnsnoozed}`.
 
 ---
 
@@ -362,19 +368,11 @@ Mutating tool calls surface as `tool-{name}` parts in the streamed response, the
 
 ---
 
-## Email importance scoring
+## Email importance scoring (moved to lifeofbash)
 
-R3a wires a triage step into the Gmail sync. For each unread message, after metadata is fetched and before the `tasks` upsert, `scoreEmailImportance({ subject, from, snippet })` calls Gemini 3 Flash with a one-shot rubric and returns `{ score: 1-10, reason: string }`. Scores below 4 are dropped silently. The R3a behavior of "admit everything >=4 as a task" was refined in R3.5 — see "Email triage flow" above for the current 3-tier route (8-10 auto-task / 4-7 triage queue / <4 drop). The `tasks.importance smallint null` column is set on auto-tasked rows.
+Originally (R3a/R3.5) bash-os scored Gmail in-app via `scoreEmailImportance` in `src/lib/board/email-importance.ts` — a one-shot Gemini rubric returning `{ score: 1-10, reason }`, with the 3-tier route and a default-to-admit failure mode. **That scorer was removed in pillar 3.** Scoring now lives in the external lifeofbash ingestion, driven by a shared, version-controlled rubric (so the "taste" is editable as prose, not buried in app code), and the results are written into `tasks` (ADMIT) / `staged_emails` (TRIAGE/DROP) here.
 
-Why the column is unconstrained: the threshold is intentionally an app-code knob, not a CHECK. Future rounds may want per-source rubrics (e.g. different cutoffs for Slack vs Gmail) or different scales — keeping the DB schema generic avoids a migration each time. Existing pre-R3a rows stay `importance NULL`, which the rest of the code reads as "unscored", not "low".
-
-Failure semantics: if the model errors, throws a schema mismatch, or the request times out, `scoreEmailImportance` returns `{ score: 5, reason: 'scoring-failed' }`. The message is admitted with a neutral score rather than dropped — a noisy false-positive is recoverable (Bashir archives it), but a silently-dropped real email is not. The failure is `console.warn`-logged with the Gmail message ID so it can be traced.
-
-Concurrency: scoring runs across all fetched messages via `Promise.allSettled`, so a single slow call doesn't block the rest of the sync. The Gmail API list cap is 20 messages per account per sync, so concurrent scoring loads are bounded.
-
-Threshold is `IMPORTANCE_THRESHOLD = 4` in `src/lib/board/email-importance.ts`. Anything `< 4` is dropped. Calendar invites the user is required for typically score 8; personal action requests score 9-10; newsletters and CC chains hover at 3-4; marketing scores 1-2 and is consistently filtered.
-
-`/board?show_filtered=1` is a spot-check toggle: re-runs the Gmail sync with the filter disabled and tags admitted-but-low-score rows with a `[filtered:N]` title prefix so Bashir can eyeball what the rubric dropped. Deliberately a query-param affordance, not a UI button — it's a debug tool.
+The design intent carried over: `tasks.importance smallint null` is still set on auto-tasked rows and stays unconstrained (the threshold is an app/job knob, not a DB CHECK; pre-scoring rows stay `NULL` = "unscored"). The failure-to-admit bias (a false positive is recoverable, a silently-dropped real email is not) and the per-decision logging now live in the lifeofbash job + its `decisions.jsonl` prediction/verdict log.
 
 ---
 

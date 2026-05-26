@@ -2,7 +2,9 @@
 
 ## What Bash OS is
 
-A personal life-OS for one person (Bashir). A three-panel homepage at `/` is the surface: a deterministic brief + a vertical-axis timeline on the left, a user-managed kanban board in the middle, an agent-activity feed on the right, and a persistent command bar across the bottom. Behind it sits a Supabase store, a set of connectors that ingest signals from Gmail, Google Calendar, and Jira, a chat assistant that can read the board and take action through tool-calls, a long-term memory layer that the assistant retrieves from per turn, and a `/api/agent-events` ingestion endpoint that lets external workers (a Claude Code hook, a Cowork session, anything) surface their activity on the right-panel feed.
+A personal life-OS for one person (Bashir). A three-panel homepage at `/` is the surface: a deterministic brief + a vertical-axis timeline on the left, a user-managed kanban board in the middle, an agent-activity feed on the right, and a persistent command bar across the bottom. Behind it sits a Supabase store, a chat assistant that can read the board and take action through tool-calls, a long-term memory layer that the assistant retrieves from per turn, and a `/api/agent-events` ingestion endpoint that lets external workers (a Claude Code hook, a Cowork session, anything) surface their activity on the right-panel feed.
+
+**Ingestion is external (pillar 3, 2026-05-26).** Bash OS no longer syncs connectors itself. The in-app Gmail/Calendar/Slack/Jira sync was removed; the [lifeofbash](https://github.com/lebashir/lifeofbash) substrate now runs local jobs that read Gmail + Calendar, score them against shared rules, and push finished tasks + a triage queue (`staged_emails`) into this Supabase over PostgREST. Bash OS is the view + store: board, columns, triage UI, chat, memory, the agent-activity feed, and the Google connect/status UI. Triage verdicts (promote/dismiss/delete) sync back to lifeofbash as a training signal.
 
 ## Stack
 
@@ -10,10 +12,10 @@ A personal life-OS for one person (Bashir). A three-panel homepage at `/` is the
 - **Tailwind 4** — utility-first styling.
 - **shadcn/ui** — components on Radix primitives; toasts via `sonner`.
 - **@dnd-kit** — drag-and-drop on the board (`core` + `sortable` + `utilities`).
-- **AI SDK v6** (`ai` + `@ai-sdk/google` + `@ai-sdk/react`) — chat agent, streaming, embeddings, task decomposition, email importance scoring.
-- **Gemini** — `gemini-3-flash-preview` for chat + decomposition + email scoring; `gemini-embedding-001` (1536 dims) for memories.
+- **AI SDK v6** (`ai` + `@ai-sdk/google` + `@ai-sdk/react`) — chat agent, streaming, embeddings, task decomposition. (Email importance scoring moved to the external lifeofbash ingestion.)
+- **Gemini** — `gemini-3-flash-preview` for chat + decomposition; `gemini-embedding-001` (1536 dims) for memories.
 - **Supabase** — Postgres + pgvector + Auth + RLS. Cloud project ref `vbooingflkmzxcqnbvxr`.
-- **Vercel** — hosting at `bash-os.vercel.app`; Vercel Cron for morning sync and nightly unsnooze.
+- **Vercel** — hosting at `bash-os.vercel.app`; one Vercel Cron for nightly unsnooze (the morning-sync cron was removed when ingestion moved local).
 - **pnpm** — package manager.
 
 ## Architecture overview
@@ -25,11 +27,11 @@ Tasks live in `public.tasks` and belong to user-managed columns in `public.colum
 - **Right panel** — agent activity feed from `public.agent_events` (top section, polled every 30s) above a context placeholder.
 - **Command bar** — persistent at the bottom. ⌘K focus. Prefixes `task:` / `add:` / `capture:` / `todo:` short-circuit straight to a `createTask` server action (no LLM). Everything else streams chat through `/api/chat` into a popover above the bar.
 
-Connectors run server-side: Gmail and Google Calendar use multi-account OAuth with refresh tokens stored in `connector_tokens`; Jira uses a personal access token from env. Each connector resolves its target column (`Inbox` for gmail/slack, `Today` for calendar, `Active` for jira) via `resolveColumnId` and upserts into `tasks`, deduped on `(user_id, source, source_account, source_id)`. Gmail's R3a importance scorer now splits the admit band three ways: score 8-10 auto-task to Inbox, 4-7 → `public.pending_emails` (triage queue), 0-3 drop. The triage queue surfaces in the brief as an attention bar; clicking opens a keyboard-driven `TriageModal`.
+Ingestion runs externally (lifeofbash local jobs) and writes into this store over PostgREST: scored Gmail + Calendar items land in `tasks` (deduped on `(user_id, source, source_account, source_id)`, target column resolved by name — `Inbox` for gmail, `Today` for calendar), and the score-4-to-7 Gmail "triage" band lands in `public.staged_emails`. The triage queue surfaces in the brief as an attention bar; clicking opens a keyboard-driven `TriageModal` whose promote/dismiss/snooze actions soft-delete the staged row (stamping `decision`/`snoozed_until`) so the verdict can sync back to lifeofbash. The Google connect/status UI still lives here (`connector_tokens` via `/connectors/google/*`, surfaced as account pills), but bash-os no longer reads those tokens to sync — lifeofbash holds its own credentials.
 
 Chat backend is unchanged from R2.5: `/api/chat` builds a per-turn context (column-grouped board state, calendar next-24h, recent emails, top-K semantically matched memories from `match_memories`) and runs a `ToolLoopAgent` with four mutating tools (`createTask`, `moveTask`, `updateTask`, `deleteTask`) and two read tools (`findTasks`, `findMemories`). The tools take column **names** which resolve to ids server-side. Memory writes still happen via the "Remember" affordance; memory reads happen automatically per turn.
 
-A Vercel Cron at 5:30 UTC (9:30 Dubai) re-syncs Gmail + Calendar per user. The R2 LLM-generated brief was retired — the brief panel reads current state every page render. A second cron at 20:05 UTC (00:05 Dubai) clears expired snoozed_until on tasks and pending_emails.
+Ingestion is external (lifeofbash local jobs push tasks + triage rows; no in-app sync cron). The R2 LLM-generated brief was retired — the brief panel reads current state every page render. A single Vercel Cron at 20:05 UTC (00:05 Dubai) clears expired `snoozed_until` on tasks and `staged_emails`.
 
 ## Prerequisites
 
@@ -38,8 +40,8 @@ A Vercel Cron at 5:30 UTC (9:30 Dubai) re-syncs Gmail + Calendar per user. The R
 - Docker (only if you want to run a local Supabase stack — see Local dev caveat)
 - Supabase CLI (`brew install supabase/tap/supabase`)
 - A Google Cloud project with an OAuth 2.0 Web client + Gemini API key
-- For Jira: an Atlassian site and API token (https://id.atlassian.com/manage-profile/security/api-tokens)
-- For Slack: a custom Slack app with `im:history`, `im:read`, `users:read` user scopes (requires workspace admin to install — see Known issues)
+
+(Jira and Slack are no longer ingested by bash-os — the in-app connectors were removed in the pillar-3 cleanup. Their env vars below are vestigial.)
 
 ## Local dev
 
@@ -85,6 +87,9 @@ Migrations (in apply order):
 | `20260519040000_r3_5_columns_and_owner.sql` | R3.5 — creates `columns` / `task_events` / `recurrences` / `agent_events` / `pending_emails`. Adds `tasks.column_id` (nullable), `owner`, `needs_review`, `tags`, `snoozed_until`. |
 | `20260519050000_r3_5_seed_columns_and_migrate_tasks.sql` | R3.5 — seeds 5 starter columns (Inbox / Today / Active / Review / Done) per user; back-fills `tasks.column_id` + `owner` from the legacy status mapping. Aborts if any row remains with null column_id. |
 | `20260519060000_r3_5_drop_status_column.sql` | R3.5 — destructive. Drops `tasks.status` and the old `tasks_user_status_position_idx`. Locks `tasks.column_id` to NOT NULL. |
+| `20260526120000_pillar3_staged_emails.sql` | Pillar 3 Slice A — `staged_emails` triage queue (TRIAGE/DROP band + scorer guess + `decision`). Written by lifeofbash ingestion. |
+| `20260526130000_pillar3_slice_b.sql` | Pillar 3 Slice B — `task_events.task_id` FK `CASCADE`→`SET NULL` (a deleted task's event survives, so the over-admit verdict is captured) + `staged_emails.snoozed_until`. |
+| `20260526140000_drop_pending_emails.sql` | Pillar 3 cleanup — drops the dormant `pending_emails` table (the in-app triage queue that the external ingestion replaced). |
 
 ## Environment variables
 
@@ -94,37 +99,29 @@ See `.env.example` for the canonical list. Quick reference:
 |---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | yes | Cloud Supabase project URL. |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Cloud Supabase anon/publishable key. |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server-only. Used by the cron job to bypass RLS when fanning out per-user syncs. Never exposed client-side. |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server-only. Used by the unsnooze cron to bypass RLS, and by the external lifeofbash ingestion to write tasks/staged_emails. Never exposed client-side. |
 | `GOOGLE_OAUTH_CLIENT_ID` | yes | Google OAuth Web client ID. Used by `/connectors/google/connect` to start the OAuth dance and by token refresh. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | Paired with the client ID. |
 | `GEMINI_API_KEY` | yes | Direct Google Generative Language API key from https://aistudio.google.com/apikey. Used for chat, brief, embeddings. |
-| `CRON_SECRET` | yes | Random string. Vercel Cron sends it as `Authorization: Bearer <value>` to `/api/cron/daily-brief`. |
-| `JIRA_BASE_URL` | optional | e.g. `https://tabby.atlassian.net`. Skipping any of the three Jira vars silently disables the Jira connector. |
-| `JIRA_EMAIL` | optional | Atlassian login email. |
-| `JIRA_API_TOKEN` | optional | Personal API token. |
-| `SLACK_USER_TOKEN` | optional | `xoxp-…` user token. Silently disables Slack connector when unset. See Known issues — currently blocked by org admin policy. |
+| `CRON_SECRET` | yes | Random string. Vercel Cron sends it as `Authorization: Bearer <value>` to `/api/cron/unsnooze`. |
+| `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` | unused | Powered the removed in-app Jira connector. Safe to drop from the Vercel project. |
+| `SLACK_USER_TOKEN` | unused | Powered the removed in-app Slack connector. Safe to drop. |
 | `AGENT_EVENTS_TOKEN` | yes | Project-wide shared secret for the `/api/agent-events` ingestion endpoint. Generate with `node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))'`. Distinct values per environment. |
 
 ## Connectors
 
-### Google (Gmail + Calendar) — OAuth, multi-account
+**Ingestion moved out of bash-os (pillar 3, 2026-05-26).** The in-app sync —
+Gmail (`email-importance.ts` scorer), Calendar, Jira, and Slack — was removed
+along with the `syncAll` orchestrator and the `daily-brief` cron. Those signals
+are now read, scored, and pushed in by external [lifeofbash](https://github.com/lebashir/lifeofbash)
+local jobs (Gmail + Calendar today; Jira/Slack are not currently ingested). What
+remains in bash-os is the **Google connect/status UI** below.
 
-- Token flow: `/connectors/google/connect` redirects to Google OAuth; `/connectors/google/callback` exchanges the code, stores `access_token` + `refresh_token` + `expires_at` + `scopes` in `connector_tokens` keyed on `(user_id, provider='google', account_email)`. One Bash OS user can connect multiple Google accounts (e.g. work + personal).
+### Google connect (OAuth, multi-account) — still live
+
+- Token flow: `/connectors/google/connect` redirects to Google OAuth; `/connectors/google/callback` exchanges the code, stores `access_token` + `refresh_token` + `expires_at` + `scopes` in `connector_tokens` keyed on `(user_id, provider='google', account_email)`. One Bash OS user can connect multiple Google accounts (e.g. work + personal); they surface as account pills in the header (`connectors.ts` + `connector-status.ts`).
 - Scopes requested: `openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly`.
-- Refresh: lazy. On each connector call, `getGoogleAccessToken` reads the stored row; if it's within 60s of expiry, refreshes against `https://oauth2.googleapis.com/token` and persists the new access token + expiry. Failed refresh surfaces as "reconnect the account".
-- **Gmail sync:** queries `is:unread in:inbox`, pulls last 20 messages, scores each via Gemini 3 Flash (`src/lib/board/email-importance.ts`). R3.5 split the admit band three ways: score 8-10 auto-tasks to the **Inbox** column; score 4-7 lands in `public.pending_emails` for triage (brief panel attention bar + `TriageModal`); score <4 drops. All auto-tasked rows carry `source='gmail'`, `source_account=<email>`, `source_id=<gmail message id>`, and `importance`. Dedup via `(user_id, source, source_account, source_id)`. Scoring failures default to `score=5` (admit) so a model outage never silently swallows real mail. Append `?show_filtered=1` to `/` to re-run sync without dropping low-score messages — admitted-but-low rows get a `[filtered:N]` title prefix.
-- **Calendar sync:** pulls the next 24h of events, lands them in the **Today** column with `source='calendar'`. `due_date` is set to the event start time.
-
-### Jira — PAT, single site
-
-- No OAuth dance. Token read from `JIRA_API_TOKEN` env, paired with `JIRA_EMAIL` for HTTP Basic auth against `JIRA_BASE_URL`.
-- JQL: `assignee = currentUser() AND statusCategory != Done`. Hits `POST /rest/api/3/search/jql` (the new endpoint after Atlassian deprecated `GET /search`).
-- Lands issues in the **Active** column (assigned issues are already actionable) with `owner='bash'`, `source='jira'`, `source_account=<host>`, `source_id=<ISSUE-KEY>`. Maps Jira priority Highest/High/Medium/Low/Lowest → bash-os `urgent`/`high`/`normal`/`low`. Sets `due_date` from `fields.duedate` if present.
-
-### Slack — code shipped, blocked at install time
-
-- Code lives at `src/lib/board/slack-sync.ts`. Reads `SLACK_USER_TOKEN` (a `xoxp-…` user token), calls `auth.test` to discover workspace + self ID, lists DM channels via `conversations.list?types=im`, pulls last 48h from each via `conversations.history`, drops the OTHER party's messages into the **Inbox** column deduped by `(channel:ts)`.
-- Bashir is not a workspace admin at Tabby and Slack killed legacy user tokens in 2020, so the token can't currently be obtained. The connector silently no-ops when `SLACK_USER_TOKEN` is unset, so the rest of the app is unaffected.
+- These tokens were what the old in-app sync used. With sync external, bash-os keeps the connect surface but the lifeofbash ingestion authenticates with its own local credentials (`~/.config/lifeofbash/google/`), not these rows. The connect UI is therefore a candidate for a later trim.
 
 ## Command bar + chat tools
 
@@ -192,7 +189,7 @@ Returns `{ ok: true, id, created_at }` on success, 401 on missing/bad bearer, 40
 }
 ```
 
-Bash OS itself writes to the same table from the morning cron (one "morning sync" event per user, with per-source counts in the payload) and `/api/chat` (one "message" event per user turn, target = leading 120 chars of the prompt).
+Bash OS itself writes to the same table from `/api/chat` (one "message" event per user turn, target = leading 120 chars of the prompt). The external lifeofbash ingestion can post its own run events here too.
 
 ## Task decomposition ("Break it down")
 
@@ -210,20 +207,17 @@ See `docs/ARCHITECTURE.md` → "Task decomposition" for the schema, classificati
 
 ## Scheduled jobs
 
-`vercel.json` declares two crons:
+`vercel.json` declares one cron:
 
 ```json
 [
-  { "path": "/api/cron/daily-brief", "schedule": "30 5 * * *" },
-  { "path": "/api/cron/unsnooze",    "schedule": "5 20 * * *" }
+  { "path": "/api/cron/unsnooze", "schedule": "5 20 * * *" }
 ]
 ```
 
-**Morning sync** (05:30 UTC = 09:30 Dubai). For each user with at least one connected Google account, syncs Gmail + Calendar in parallel and writes a "morning sync" row to `public.agent_events`. R3.5 stopped generating an LLM brief — the brief panel reads current state every page render. The endpoint verifies the `Authorization: Bearer <CRON_SECRET>` header (401 otherwise).
+**Nightly unsnooze** (20:05 UTC = 00:05 Dubai). Clears expired `snoozed_until` on `tasks` and `staged_emails`, so snoozed items reappear at the start of the user's local day. Verifies the `Authorization: Bearer <CRON_SECRET>` header (401 otherwise).
 
-**Nightly unsnooze** (20:05 UTC = 00:05 Dubai). Clears expired `snoozed_until` on `tasks` and `pending_emails`. Same `CRON_SECRET` bearer.
-
-Manual invocation: `curl -H "Authorization: Bearer $CRON_SECRET" https://bash-os.vercel.app/api/cron/daily-brief`. Returns `{ok:true, userCount, summaries:[…]}` on success.
+The old morning-sync cron (`/api/cron/daily-brief`) was removed when ingestion moved local (pillar 3) — Gmail/Calendar are now pushed in by external lifeofbash jobs.
 
 ## Deploying to Vercel
 
@@ -236,4 +230,4 @@ Vercel Server Actions and Route Handlers read env vars at runtime — adding or 
 
 ## Round status
 
-R1, R2, R2.5, R3 (both R3a and R3b), and R3.5 (UX redesign + custom columns + owner + command bar + agent activity + email triage) are complete. A small R3.5c follow-up holds the trimmed items (board filter/sort, recurring tasks UI, right-panel chat history). Next strategic round is R4 — autonomous Claude-owned tasks. See `docs/ROUNDS.md` for the round-by-round breakdown.
+R1, R2, R2.5, R3 (both R3a and R3b), and R3.5 (UX redesign + custom columns + owner + command bar + agent activity + email triage) are complete. The pillar-3 work (2026-05-26) moved ingestion out to lifeofbash and removed the in-app sync engine + `pending_emails` table. A small R3.5c follow-up holds the trimmed items (board filter/sort, recurring tasks UI, right-panel chat history). Next strategic round is R4 — autonomous Claude-owned tasks. See `docs/ROUNDS.md` for the round-by-round breakdown.

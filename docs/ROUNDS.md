@@ -142,6 +142,17 @@ The substrate split. Before R4 builds an execution layer, lifeofbash gets create
 
 ---
 
+## Pillar 3 (lifeofbash connection) — ingestion moved local — ✅ Complete (2026-05-26)
+
+Not a numbered round — the bash-os side of the lifeofbash "connection epic." The decision (Architecture 2): lifeofbash holds the filtering taste/standards and runs ingestion locally; bash-os becomes a thin view + store. This round's bash-os-side work:
+
+- *In-app sync removed.* The entire in-app connector engine — `email-importance` scorer, the gmail/calendar/slack/jira sync libs, the `syncAll` orchestrator, the `syncGmail`/`syncCalendar` shims, and the `/api/cron/daily-brief` morning cron — was deleted. It was already orphaned (SyncButton went in R3.5; the cron was removed in Slice A; nothing in the UI called the server actions). Gmail + Calendar are now scored and pushed in by external lifeofbash local jobs over PostgREST.
+- *Triage moved to `staged_emails` (Slice A + B).* New `staged_emails` table carries the scorer's full guess (band/reason/title/tags + `decision`). `TriageModal` retargeted from the dropped `pending_emails` to it, with **soft-delete**: promote/dismiss/snooze stamp `decision`/`snoozed_until` so the verdict survives. `task_events.task_id` became `ON DELETE SET NULL` and the delete handlers stamp `source`/`source_id`, so a deleted ADMIT task is captured as an "over-admit" signal. A lifeofbash `sync-decisions` job reads these verdicts back into a committed `decisions.jsonl` training log.
+- *Migrations:* `20260526120000` (staged_emails), `20260526130000` (FK SET NULL + snooze), `20260526140000` (drop `pending_emails`). The only remaining cron is `/api/cron/unsnooze`.
+- *Kept:* the Google connect/status UI (`connectors.ts`, `connector-status.ts`, the account pills) — though it no longer feeds any sync (lifeofbash uses its own local credentials), so it's a candidate for a later trim.
+
+---
+
 ## R4 — Local Claude Code daemon executes Claude-owned tasks — 🔜 Planned, not started
 
 - *Why it matters:* R3.5 made `owner='claude'` a first-class field but nothing happens automatically when a task is assigned to Claude. R4 turns that field into a real execution trigger — Bashir marks a task `owner='claude'`, the daemon picks it up, Claude Code runs the task in the right working directory, the output lands in Review for Bashir to approve.

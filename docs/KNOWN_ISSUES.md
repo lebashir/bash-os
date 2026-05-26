@@ -24,27 +24,26 @@ Live wonkiness, deferred fixes, and "don't waste time on this" notes. Short and 
 - Anything with the service-role key reads them in cleartext. For a single-user personal tool this is acceptable.
 - If Bash OS ever goes multi-user, this needs Supabase Vault or pgcrypto with a project secret.
 
-## 4. Slack connector blocked at install time
+## 4. Slack connector removed (was blocked at install time)
 
-- Code shipped at `src/lib/board/slack-sync.ts`. Silently no-ops when `SLACK_USER_TOKEN` is unset.
-- Bashir can't create Slack apps at Tabby (not a workspace admin) and Slack killed legacy user PATs in 2020. There's no clean path to a working token.
-- If admin status ever changes: create a workspace app with `im:history`, `im:read`, `users:read` user scopes, install to workspace, copy the `xoxp-…` user token into env. Connector activates with zero code change.
+- The in-app Slack sync (`src/lib/board/slack-sync.ts`) was **removed in the pillar-3 cleanup** along with the rest of the in-app sync engine. It had never worked: Bashir can't create Slack apps at Tabby (not a workspace admin) and Slack killed legacy user PATs in 2020.
+- If Slack is ever wanted again, it would be added as a source in the external lifeofbash ingestion, not re-added here.
 
 ## 5. ClickUp permanently dropped
 
 - Bash OS *replaces* ClickUp for Bashir's personal use. Don't build a connector for the tool we're moving off of.
 - This is not a "todo later" — it's a "never". If a future round prompt says "let's add ClickUp", stop and re-read this entry.
 
-## 6. Gmail importance threshold is hard-coded — RESOLVED in R3a, refined in R3.5
+## 6. Gmail importance scoring moved out of bash-os — pillar 3
 
-- R3a (2026-05-19) added per-message scoring with `IMPORTANCE_THRESHOLD = 4` for admit/drop.
-- R3.5 (2026-05-19) split the admit band: 8-10 auto-task to Inbox, 4-7 → triage queue (`public.pending_emails`) surfaced as a brief attention bar + `TriageModal`. See `docs/ARCHITECTURE.md` → "Email triage flow".
-- The `show_filtered=1` query param still re-runs sync without the floor for rubric debugging.
+- R3a/R3.5 scored Gmail in-app (`email-importance.ts`, `IMPORTANCE_THRESHOLD = 4`, 3-tier admit/triage/drop). **Removed in pillar 3** — scoring now lives in the external lifeofbash ingestion against a version-controlled rubric, and writes `tasks` (ADMIT) / `staged_emails` (TRIAGE/DROP) here.
+- The old `pending_emails` triage table was dropped (`20260526140000`); the live triage surface is `staged_emails` + `TriageModal`. See `docs/ARCHITECTURE.md` → "Email triage flow".
+- The `show_filtered=1` debug toggle went away with the in-app sync.
 
-## 7. No connector rate-limit handling
+## 7. Connector rate-limit handling — now lifeofbash's concern
 
-- Gmail, Calendar, and Jira fetches go out without backoff. A 429 or 5xx surfaces as a sync error and the per-account `error` field. The user retries by hitting Sync again.
-- Hasn't been a problem at single-user scale. Worth revisiting if the morning cron ever fans out across multiple users.
+- bash-os no longer fetches from Gmail/Calendar/Jira itself (in-app sync removed in pillar 3). Any backoff / 429 handling now lives in the external lifeofbash ingestion jobs.
+- Not a bash-os issue anymore; kept for context.
 
 ## 8. Tabby corporate TLS blocks local Supabase
 
