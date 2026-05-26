@@ -97,9 +97,10 @@ export async function getBriefState(): Promise<BriefState> {
       .eq("user_id", user.id)
       .or(`snoozed_until.is.null,snoozed_until.lte.${nowIso}`),
     supabase
-      .from("pending_emails")
+      .from("staged_emails")
       .select("id, score, snoozed_until")
       .eq("user_id", user.id)
+      .eq("decision", "pending")
       .or(`snoozed_until.is.null,snoozed_until.lte.${nowIso}`),
   ]);
 

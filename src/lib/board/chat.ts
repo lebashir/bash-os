@@ -479,9 +479,18 @@ async function execDeleteTask(
 ): Promise<TaskMutationResult> {
   const target = await resolveTaskByQuery(supabase, userId, args.taskQuery);
 
+  const { data: src } = await supabase
+    .from("tasks")
+    .select("source, source_account, source_id")
+    .eq("id", target.id)
+    .eq("user_id", userId)
+    .maybeSingle();
+
   await recordTaskEvent(supabase, userId, target.id, "deleted", {
     title: target.title,
-    source: "chat",
+    source: src?.source ?? "chat",
+    source_account: src?.source_account ?? null,
+    source_id: src?.source_id ?? null,
   });
 
   const { error } = await supabase

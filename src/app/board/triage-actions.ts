@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { resolveColumnId } from "@/lib/board/columns";
 import { createClient } from "@/lib/supabase/server";
-import type { PendingEmail } from "@/lib/supabase/types";
+import type { StagedEmail } from "@/lib/supabase/types";
 
 async function requireUser() {
   const supabase = await createClient();
@@ -17,21 +17,26 @@ async function requireUser() {
   return { supabase, user };
 }
 
-export async function listPendingEmails(): Promise<PendingEmail[]> {
+// Slice B: the triage surface now reads staged_emails (TRIAGE + DROP band rows
+// the scorer did not auto-admit). Promote/dismiss/snooze soft-delete by stamping
+// `decision`/`snoozed_until` rather than removing the row, so the lifeofbash
+// verdict sync can read Bashir's call back into decisions.jsonl.
+export async function listPendingEmails(): Promise<StagedEmail[]> {
   const { supabase, user } = await requireUser();
   const nowIso = new Date().toISOString();
   const { data, error } = await supabase
-    .from("pending_emails")
+    .from("staged_emails")
     .select("*")
     .eq("user_id", user.id)
+    .eq("decision", "pending")
     .or(`snoozed_until.is.null,snoozed_until.lte.${nowIso}`)
     .order("score", { ascending: false })
-    .order("inserted_at", { ascending: false });
+    .order("created_at", { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load pending emails: ${error.message}`);
+    throw new Error(`Failed to load staged emails: ${error.message}`);
   }
-  return (data ?? []) as PendingEmail[];
+  return (data ?? []) as StagedEmail[];
 }
 
 const idSchema = z.object({ id: z.string().uuid() });
@@ -41,15 +46,12 @@ export async function dismissPendingEmail(
 ): Promise<void> {
   const { id } = idSchema.parse(input);
   const { supabase, user } = await requireUser();
-
   const { error } = await supabase
-    .from("pending_emails")
-    .delete()
+    .from("staged_emails")
+    .update({ decision: "dropped", decided_at: new Date().toISOString() })
     .eq("id", id)
     .eq("user_id", user.id);
-  if (error) {
-    throw new Error(`Dismiss failed: ${error.message}`);
-  }
+  if (error) throw new Error(`Dismiss failed: ${error.message}`);
   revalidatePath("/");
 }
 
@@ -59,14 +61,14 @@ export async function promotePendingEmailToTask(
   const { id } = idSchema.parse(input);
   const { supabase, user } = await requireUser();
 
-  const { data: pending, error: loadErr } = await supabase
-    .from("pending_emails")
-    .select("subject, sender, snippet, gmail_message_id, score")
+  const { data: staged, error: loadErr } = await supabase
+    .from("staged_emails")
+    .select("subject, sender, snippet, source_id, source_account, score, scorer_tags")
     .eq("id", id)
     .eq("user_id", user.id)
     .maybeSingle();
   if (loadErr) throw new Error(`Load failed: ${loadErr.message}`);
-  if (!pending) throw new Error("Pending email not found.");
+  if (!staged) throw new Error("Staged email not found.");
 
   const inboxId = await resolveColumnId(supabase, user.id, "Inbox");
   if (!inboxId) throw new Error("No Inbox column found for user.");
@@ -85,13 +87,15 @@ export async function promotePendingEmailToTask(
     .from("tasks")
     .insert({
       user_id: user.id,
-      title: pending.subject,
-      description: `From: ${pending.sender}\n\n${pending.snippet ?? ""}`,
+      title: staged.subject,
+      description: `From: ${staged.sender}\n\n${staged.snippet ?? ""}`,
       column_id: inboxId,
       owner: "bash",
       source: "gmail",
-      source_id: pending.gmail_message_id,
-      importance: pending.score,
+      source_account: staged.source_account,
+      source_id: staged.source_id,
+      importance: staged.score,
+      tags: staged.scorer_tags ?? [],
       position,
     })
     .select("id")
@@ -105,12 +109,13 @@ export async function promotePendingEmailToTask(
     metadata: { source: "triage" },
   });
 
-  const { error: delErr } = await supabase
-    .from("pending_emails")
-    .delete()
+  // Soft-delete: mark the verdict, do NOT remove the row (the sync reads it).
+  const { error: updErr } = await supabase
+    .from("staged_emails")
+    .update({ decision: "promoted", decided_at: new Date().toISOString() })
     .eq("id", id)
     .eq("user_id", user.id);
-  if (delErr) throw new Error(`Cleanup failed: ${delErr.message}`);
+  if (updErr) throw new Error(`Mark promoted failed: ${updErr.message}`);
 
   revalidatePath("/");
 }
@@ -127,7 +132,7 @@ export async function snoozePendingEmail(
   const { supabase, user } = await requireUser();
   const until = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
   const { error } = await supabase
-    .from("pending_emails")
+    .from("staged_emails")
     .update({ snoozed_until: until })
     .eq("id", id)
     .eq("user_id", user.id);
