@@ -97,23 +97,10 @@ export type AgentEvent = {
   created_at: string;
 };
 
-export type PendingEmail = {
-  id: string;
-  user_id: string;
-  gmail_message_id: string;
-  subject: string;
-  sender: string;
-  snippet: string | null;
-  score: number;
-  received_at: string | null;
-  snoozed_until: string | null;
-  inserted_at: string;
-};
-
-// Slice B: the live triage surface. staged_emails carries the scorer's full
-// guess (band/reason/title/tags) plus the verdict (`decision`) so board calls
-// sync back into lifeofbash decisions.jsonl. PendingEmail above is kept for the
-// dormant pending_emails table (cleanup deferred).
+// The live triage surface. staged_emails carries the scorer's full guess
+// (band/reason/title/tags) plus the verdict (`decision`) so board calls sync
+// back into lifeofbash decisions.jsonl. (The old pending_emails table + its
+// PendingEmail type were dropped once local ingestion replaced the in-app sync.)
 export type StagedEmail = {
   id: string;
   user_id: string;

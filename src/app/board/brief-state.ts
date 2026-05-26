@@ -67,7 +67,7 @@ interface TaskRow {
   snoozed_until: string | null;
 }
 
-interface PendingEmailRow {
+interface StagedEmailRow {
   id: string;
   score: number;
   snoozed_until: string | null;
@@ -110,7 +110,7 @@ export async function getBriefState(): Promise<BriefState> {
 
   const columns = (columnsRes.data ?? []) as ColumnRow[];
   const tasks = (tasksRes.data ?? []) as TaskRow[];
-  const pending = (pendingRes.data ?? []) as PendingEmailRow[];
+  const pending = (pendingRes.data ?? []) as StagedEmailRow[];
 
   const columnByName = new Map(columns.map((c) => [c.name, c.id]));
   const doneId = columnByName.get("Done");
