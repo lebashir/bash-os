@@ -22,7 +22,7 @@ they're trivially greppable and trivially deletable.
 | Overdue task | `public.tasks` | `source_id = 'r35-test-overdue'` | Fires the `tasks-overdue` bar (red). |
 | Urgent gmail task (importance=10) | `public.tasks` | `source_id = 'r35-test-urgent-email'` | Fires the `emails-urgent` bar (red, importance ≥ 9). |
 | Needs-review task, owner=claude | `public.tasks` | `source_id = 'r35-test-needs-review'` | Fires the `needs-review` bar (amber, `needs_review=true`). Also demonstrates the claude-owner tint on a card. |
-| Pending email row | `public.pending_emails` | `gmail_message_id = 'r35-test-pending-1'` | Fires the `emails-triage` bar (amber) and gives `TriageModal` a row to render. |
+| Staged triage email | `public.staged_emails` | `source_id = 'r35-test-staged-1'` (set `decision='pending'`, `band='TRIAGE'`, a `score`) | Fires the `emails-triage` bar (amber) and gives `TriageModal` a row to render. (Was `pending_emails` before pillar 3 dropped that table.) |
 
 ### Cleanup SQL
 
@@ -31,7 +31,7 @@ you no longer want them surfacing:
 
 ```sql
 delete from public.tasks where source_id like 'r35-test-%';
-delete from public.pending_emails where gmail_message_id like 'r35-test-%';
+delete from public.staged_emails where source_id like 'r35-test-%';
 ```
 
 ### Why we don't ship them to prod
