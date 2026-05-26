@@ -16,7 +16,7 @@ import {
   promotePendingEmailToTask,
   snoozePendingEmail,
 } from "@/app/board/triage-actions";
-import type { PendingEmail } from "@/lib/supabase/types";
+import type { StagedEmail } from "@/lib/supabase/types";
 
 interface TriageModalProps {
   open: boolean;
@@ -26,7 +26,7 @@ interface TriageModalProps {
 const SNOOZE_HOURS = 24;
 
 export function TriageModal({ open, onOpenChange }: TriageModalProps) {
-  const [emails, setEmails] = useState<PendingEmail[]>([]);
+  const [emails, setEmails] = useState<StagedEmail[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [pending, startTransition] = useTransition();
@@ -82,26 +82,26 @@ export function TriageModal({ open, onOpenChange }: TriageModalProps) {
     });
   }
 
-  function handlePromote(email: PendingEmail) {
+  function handlePromote(email: StagedEmail) {
     withRemoval(email.id, "made task", () =>
       promotePendingEmailToTask({ id: email.id }),
     );
   }
 
-  function handleDismiss(email: PendingEmail) {
+  function handleDismiss(email: StagedEmail) {
     withRemoval(email.id, "dismissed", () =>
       dismissPendingEmail({ id: email.id }),
     );
   }
 
-  function handleSnooze(email: PendingEmail) {
+  function handleSnooze(email: StagedEmail) {
     withRemoval(email.id, `snoozed ${SNOOZE_HOURS}h`, () =>
       snoozePendingEmail({ id: email.id, hours: SNOOZE_HOURS }),
     );
   }
 
-  function openInGmail(email: PendingEmail) {
-    const url = `https://mail.google.com/mail/u/0/#inbox/${email.gmail_message_id}`;
+  function openInGmail(email: StagedEmail) {
+    const url = `https://mail.google.com/mail/u/0/#inbox/${email.source_id}`;
     window.open(url, "_blank");
   }
 

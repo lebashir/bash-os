@@ -110,6 +110,30 @@ export type PendingEmail = {
   inserted_at: string;
 };
 
+// Slice B: the live triage surface. staged_emails carries the scorer's full
+// guess (band/reason/title/tags) plus the verdict (`decision`) so board calls
+// sync back into lifeofbash decisions.jsonl. PendingEmail above is kept for the
+// dormant pending_emails table (cleanup deferred).
+export type StagedEmail = {
+  id: string;
+  user_id: string;
+  source: string;
+  source_account: string;
+  source_id: string;
+  subject: string;
+  sender: string;
+  snippet: string | null;
+  score: number;
+  band: string;
+  reason: string | null;
+  scorer_title: string | null;
+  scorer_tags: string[];
+  decision: "pending" | "promoted" | "dropped" | "kept";
+  created_at: string;
+  decided_at: string | null;
+  snoozed_until: string | null;
+};
+
 export const CONNECTOR_PROVIDERS = ["google"] as const;
 export type ConnectorProvider = (typeof CONNECTOR_PROVIDERS)[number];
 

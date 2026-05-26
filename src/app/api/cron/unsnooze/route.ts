@@ -5,7 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export const dynamic = "force-dynamic";
 
 // Nightly cron that clears expired snoozed_until on tasks and
-// pending_emails. Scheduled at 00:05 Dubai (20:05 UTC) via vercel.json.
+// staged_emails. Scheduled at 00:05 Dubai (20:05 UTC) via vercel.json.
 // Snoozed items effectively reappear at the start of the user's local day.
 
 export async function GET(request: NextRequest) {
@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
       .lte("snoozed_until", nowIso)
       .select("id"),
     admin
-      .from("pending_emails")
+      .from("staged_emails")
       .update({ snoozed_until: null })
       .lte("snoozed_until", nowIso)
       .select("id"),
@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
   }
   if (emailsRes.error) {
     return NextResponse.json(
-      { ok: false, error: `pending_emails unsnooze failed: ${emailsRes.error.message}` },
+      { ok: false, error: `staged_emails unsnooze failed: ${emailsRes.error.message}` },
       { status: 500 },
     );
   }
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     ok: true,
     tasksUnsnoozed: tasksRes.data?.length ?? 0,
-    pendingEmailsUnsnoozed: emailsRes.data?.length ?? 0,
+    stagedEmailsUnsnoozed: emailsRes.data?.length ?? 0,
   });
 }
 
