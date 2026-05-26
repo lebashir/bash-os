@@ -145,15 +145,18 @@ export async function deleteTask(id: string): Promise<void> {
   const { supabase, user } = await requireUser();
   const { data: prior } = await supabase
     .from("tasks")
-    .select("title")
+    .select("title, source, source_account, source_id")
     .eq("id", id)
     .maybeSingle();
 
-  // Record the deletion before the row goes; task_events.task_id is
-  // ON DELETE CASCADE so the row itself would disappear, but a
-  // snapshot of the title preserves the timeline entry.
+  // task_events.task_id is now ON DELETE SET NULL (Slice B migration), so this
+  // event survives the row. Stamp source/source_id so the verdict sync can join
+  // a deleted ADMIT task back to its scorer prediction (the over-admit signal).
   await recordTaskEvent(supabase, user.id, id, "deleted", {
     title: prior?.title ?? null,
+    source: prior?.source ?? null,
+    source_account: prior?.source_account ?? null,
+    source_id: prior?.source_id ?? null,
   });
 
   const { error } = await supabase.from("tasks").delete().eq("id", id);
